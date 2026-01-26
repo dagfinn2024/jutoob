@@ -1,0 +1,18 @@
+{
+  "manifest_version": 2,
+  "name": "JuToob Auto-like Addon",
+  "version": "1.0",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "autolike@jutoob"
+    }
+  },
+  "description": "Autolike for subscribed YouTube channels",
+  "content_scripts": [
+    {
+      "matches": ["*://*.youtube.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_end"
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "manifest_version": 2,
+  "name": "JuToob Addon",
+  "version": "1.0",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "internal@jutoob"
+    }
+  },
+  "description": "Removes the Open App button from mobile YouTube",
+  "content_scripts": [
+    {
+      "matches": ["*://m.youtube.com/*", "*://www.youtube.com/*"],
+      "js": ["kill-open-app.js"],
+      "run_at": "document_start"
+    }
+  ]
+}
