@@ -32,9 +32,6 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.MoreVert
@@ -63,17 +60,18 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.animation.doOnEnd
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
-import androidx.core.splashscreen.SplashScreenViewProvider
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.lifecycleScope
 import com.ju.toob.ui.theme.JuToobTheme
 import kotlinx.coroutines.delay
@@ -90,7 +88,9 @@ import org.mozilla.geckoview.WebExtensionController
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
-import kotlin.random.Random
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 
 class MainActivity : ComponentActivity() {
     private var geckoRuntime: GeckoRuntime? = null
@@ -112,6 +112,8 @@ class MainActivity : ComponentActivity() {
         val splashScreen = installSplashScreen()
         super.onCreate(savedInstanceState)
         
+        startWatchdog()
+        
         isNetworkConnected = isNetworkAvailable(this)
         
         val prefs = getPreferences(Context.MODE_PRIVATE)
@@ -124,9 +126,15 @@ class MainActivity : ComponentActivity() {
             !isYoutubeLoaded && isNetworkConnected
         }
         
+        // Safety timeout for splash screen and loading state
+        Handler(Looper.getMainLooper()).postDelayed({
+            if (!isYoutubeLoaded && isNetworkConnected) {
+                Log.w("JuToob", "Splash timeout reached, forcing content reveal")
+                isYoutubeLoaded = true
+            }
+        }, 10000)
+
         splashScreen.setOnExitAnimationListener { viewProvider ->
-            // Standard fade out for all app starts
-            // During installation, we reveal the black overlay and console instead of the browser
             val fadeOut = ObjectAnimator.ofFloat(viewProvider.view, View.ALPHA, 1f, 0f)
             fadeOut.duration = 400L
             fadeOut.interpolator = AccelerateInterpolator()
@@ -214,7 +222,7 @@ class MainActivity : ComponentActivity() {
                             Box(modifier = Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Color.Black))
                         }
 
-                        // Linux/Unix-style Console Popup
+                        // Console Popup
                         AnimatedVisibility(
                             visible = showConsole,
                             enter = fadeIn() + scaleIn(),
@@ -411,6 +419,37 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun startWatchdog() {
+        val mainHandler = Handler(Looper.getMainLooper())
+        val watchdogThread = Thread {
+            while (true) {
+                val ping = AtomicInteger(0)
+                mainHandler.post {
+                    ping.incrementAndGet()
+                }
+                
+                try {
+                    Thread.sleep(12000) // 12 seconds check
+                } catch (e: InterruptedException) {
+                    break
+                }
+                
+                // If the app is in foreground and the main thread hasn't responded
+                if (ping.get() == 0 && this.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+                    Log.e("JuToob", "WATCHDOG: Main thread unresponsive for 12s. Forcing restart.")
+                    val intent = Intent(this@MainActivity, MainActivity::class.java).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                    }
+                    startActivity(intent)
+                    Runtime.getRuntime().exit(0)
+                }
+            }
+        }
+        watchdogThread.isDaemon = true
+        watchdogThread.name = "JuToob-Watchdog"
+        watchdogThread.start()
+    }
+
     private fun isNetworkAvailable(context: Context): Boolean {
         val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         val network = connectivityManager.activeNetwork ?: return false
@@ -538,7 +577,6 @@ class MainActivity : ComponentActivity() {
                         Log.e("JuToob", "NO EXTENSIONS FOUND IN GECKO!")
                     } else {
                         Log.e("JuToob", "FOUND ${extensions.size} EXTENSIONS")
-
                     }
                 }, { e ->
                     Log.e("JuToob", "FAILED TO LIST EXTENSIONS", e)
@@ -554,10 +592,8 @@ class MainActivity : ComponentActivity() {
         Log.e("JuToob", "STARTING FRESH INSTALL")
         
         lifecycleScope.launch {
-            // Give system time to settle before showing console
             delay(300)
             showConsole = true
-            // Release splash screen; the black overlay is already active
             isYoutubeLoaded = true
             
             val controller = geckoRuntime?.webExtensionController ?: run {
@@ -603,7 +639,6 @@ class MainActivity : ComponentActivity() {
             )
 
             for ((path, name) in builtInExtensions) {
-                //logAndConsole("Executing: pkg install built-in $name")
                 val extension = suspendCoroutine<WebExtension?> { cont ->
                     controller.installBuiltIn("resource://android/assets/$path").accept(
                         { ext -> cont.resume(ext) },
@@ -620,8 +655,6 @@ class MainActivity : ComponentActivity() {
             }
             logAndConsole("[SUCCESS] All extensions processed and verified.")
 
-
-            // Immediate forced refresh
             mainSession?.stop()
             mainSession?.loadUri("https://m.youtube.com")
             isInstalling = false
@@ -643,10 +676,28 @@ fun YouTubeGeckoPlayer(
     modifier: Modifier = Modifier,
     isInstalling: Boolean = false
 ) {
-    DisposableEffect(session) {
-        runtime.webExtensionController.setTabActive(session, true)
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(session, lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> {
+                    session.setActive(true)
+                    runtime.webExtensionController.setTabActive(session, true)
+                }
+                Lifecycle.Event.ON_PAUSE -> {
+                    session.setActive(false)
+                }
+                else -> {}
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        
+        // Ensure initial state
         session.setActive(true)
+        runtime.webExtensionController.setTabActive(session, true)
+        
         onDispose { 
+            lifecycleOwner.lifecycle.removeObserver(observer)
             session.setActive(false)
         }
     }
@@ -656,8 +707,6 @@ fun YouTubeGeckoPlayer(
         factory = { ctx ->
             GeckoView(ctx).apply {
                 setSession(session)
-                // Use transparent background during installation if needed, 
-                // but Color.BLACK is safe since the overlay is on top.
                 setBackgroundColor(Color.BLACK)
             }
         },

@@ -16,8 +16,6 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-        // 5. Remove unused locales
-        resourceConfigurations += listOf("en")
     }
 
     // 3. Use ABI splits (Recommended Option 1)
