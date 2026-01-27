@@ -76,6 +76,8 @@ import androidx.lifecycle.lifecycleScope
 import com.ju.toob.ui.theme.JuToobTheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import org.mozilla.geckoview.AllowOrDeny
 import org.mozilla.geckoview.GeckoResult
 import org.mozilla.geckoview.GeckoRuntime
@@ -91,6 +93,7 @@ import kotlin.coroutines.suspendCoroutine
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import kotlin.random.Random
 
 class MainActivity : ComponentActivity() {
     private var geckoRuntime: GeckoRuntime? = null
@@ -103,6 +106,7 @@ class MainActivity : ComponentActivity() {
     private var showBlackOverlay by mutableStateOf(false)
     private var isYoutubeLoaded by mutableStateOf(false)
     private var isNetworkConnected by mutableStateOf(true)
+    private var lastPauseTime = 0L
     
     private val consoleLogs = mutableStateListOf<String>()
     private var showConsole by mutableStateOf(false)
@@ -419,34 +423,41 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onPause() {
+        super.onPause()
+        lastPauseTime = System.currentTimeMillis()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (lastPauseTime != 0L && (System.currentTimeMillis() - lastPauseTime > 300000)) {
+            Log.e("JuToob", "RESUME: App was paused for > 5 mins. Forcing refresh.")
+            mainSession?.reload()
+        }
+    }
+
     private fun startWatchdog() {
         val mainHandler = Handler(Looper.getMainLooper())
         val watchdogThread = Thread {
             while (true) {
                 val ping = AtomicInteger(0)
-                mainHandler.post {
-                    ping.incrementAndGet()
-                }
-                
+                mainHandler.post { ping.incrementAndGet() }
                 try {
-                    Thread.sleep(12000) // 12 seconds check
+                    Thread.sleep(15000)
                 } catch (e: InterruptedException) {
                     break
                 }
-                
-                // If the app is in foreground and the main thread hasn't responded
                 if (ping.get() == 0 && this.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
-                    Log.e("JuToob", "WATCHDOG: Main thread unresponsive for 12s. Forcing restart.")
+                    Log.e("JuToob", "WATCHDOG: Main thread unresponsive. Forcing restart.")
                     val intent = Intent(this@MainActivity, MainActivity::class.java).apply {
                         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
                     }
                     startActivity(intent)
                     Runtime.getRuntime().exit(0)
-                }
+                } 
             }
         }
         watchdogThread.isDaemon = true
-        watchdogThread.name = "JuToob-Watchdog"
         watchdogThread.start()
     }
 
@@ -475,9 +486,7 @@ class MainActivity : ComponentActivity() {
             }
         }
         session.navigationDelegate = object : GeckoSession.NavigationDelegate {
-            override fun onCanGoBack(session: GeckoSession, canGoBackValue: Boolean) {
-                canGoBack = canGoBackValue
-            }
+            override fun onCanGoBack(session: GeckoSession, canGoBackValue: Boolean) { canGoBack = canGoBackValue }
             override fun onLoadRequest(session: GeckoSession, request: GeckoSession.NavigationDelegate.LoadRequest): GeckoResult<AllowOrDeny> {
                 val uri = request.uri
                 if (uri.startsWith("intent:") || uri.startsWith("vnd.youtube:") || uri.startsWith("youtube:") || uri.startsWith("android-app://com.google.android.youtube")) {
@@ -489,72 +498,41 @@ class MainActivity : ComponentActivity() {
                  isHomePage = url?.contains("/watch") != true
                  val paddingValue = if (isHomePage) "18px" else "0px"
                  s.loadUri("javascript:(function() { " +
-                        "try { " +
-                        "  Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36', configurable: false }); " +
-                        "  localStorage.setItem('yt-ux-ambient-enabled', 'false'); " +
-                        "} catch(e) {} " +
-                        "if (!window.jutoobWatchdog) { " +
-                        "  window.jutoobWatchdog = setInterval(() => { " +
-                        "    const v = document.querySelector('video'); " +
-                        "    if (v && location.href.includes('/watch')) { " +
-                        "      if (!v.paused && !v.ended && !document.querySelector('.ad-showing')) { " +
+                        "try { Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36', configurable: false }); } catch(e) {} " +
+                        "if (window.jutoobWatchdog) clearInterval(window.jutoobWatchdog); " +
+                        "window.jutoobWatchdog = setInterval(() => { " +
+                        "  const v = document.querySelector('video'); " +
+                        "  const app = document.querySelector('ytm-app, #app, .ytm-app'); " +
+                        "  if (!v && !app) { " +
+                        "     window.emptyCount = (window.emptyCount || 0) + 1; " +
+                        "     if (window.emptyCount >= 4) { location.reload(); } " +
+                        "  } else { " +
+                        "     window.emptyCount = 0; " +
+                        "     if (v && location.href.includes('/watch') && !v.paused && !v.ended && !document.querySelector('.ad-showing')) { " +
                         "        if (v.currentTime === window.lastVTime) { " +
                         "          window.stallCount = (window.stallCount || 0) + 1; " +
-                        "        } else { " +
-                        "          window.stallCount = 0; " +
-                        "        } " +
-                        "        window.lastVTime = v.currentTime; " +
-                        "        if (window.stallCount >= 3) { " +
-                        "          v.play().catch(() => {}); " +
                         "          if (window.stallCount >= 6) { location.reload(); } " +
-                        "        } " +
-                        "      } else { window.stallCount = 0; } " +
-                        "      if (v.networkState === 3) { " + 
-                        "        location.reload(); " +
-                        "      } " +
-                        "    } " +
-                        "  }, 5000); " +
-                        "} " +
-                        "var bannerStyle = document.getElementById('jutoob-banner-style');" +
-                        "if (!bannerStyle) {" +
-                        "  bannerStyle = document.createElement('style');" +
-                        "  bannerStyle.id = 'jutoob-banner-style';" +
-                        "  document.head.appendChild(bannerStyle);" +
-                        "}" +
-                        "bannerStyle.innerHTML = ` " +
-                        "  ytm-app-banner, .open-in-app-banner, ytm-mealbar-promo-renderer, " +
-                        "  ytd-app-promo-renderer, ytd-smart-app-banner-renderer, ytd-banner-promo-renderer, " +
-                        "  tp-yt-paper-dialog { display: none !important; } " +
-                        "  .mobile-topbar-header, ytm-mobile-topbar-renderer { " +
-                        "    padding-right: $paddingValue !important; " +
+                        "        } else { window.stallCount = 0; } " +
+                        "        window.lastVTime = v.currentTime; " +
+                        "     } " +
                         "  } " +
-                        "`; " +
+                        "}, 5000); " +
+                        "var bannerStyle = document.getElementById('jutoob-banner-style'); if (!bannerStyle) { bannerStyle = document.createElement('style'); bannerStyle.id = 'jutoob-banner-style'; document.head.appendChild(bannerStyle); } " +
+                        "bannerStyle.innerHTML = ` ytm-app-banner, .open-in-app-banner, ytm-mealbar-promo-renderer, ytd-app-promo-renderer, ytd-smart-app-banner-renderer, ytd-banner-promo-renderer, tp-yt-paper-dialog { display: none !important; } .mobile-topbar-header, ytm-mobile-topbar-renderer { padding-right: $paddingValue !important; } `; " +
                         "})()")
             }
         }
         session.progressDelegate = object : GeckoSession.ProgressDelegate {
-            override fun onPageStop(session: GeckoSession, success: Boolean) {
-                if (success && !isYoutubeLoaded && !isInstalling) {
-                    Handler(Looper.getMainLooper()).postDelayed({
-                        if (!isYoutubeLoaded) isYoutubeLoaded = true
-                    }, 200)
-                }
-            }
-            override fun onProgressChange(session: GeckoSession, progress: Int) {
-                if (progress >= 100 && !isYoutubeLoaded && !isInstalling) {
-                    Handler(Looper.getMainLooper()).postDelayed({
-                        if (!isYoutubeLoaded) isYoutubeLoaded = true
-                    }, 200)
-                }
-            }
+            override fun onPageStop(session: GeckoSession, success: Boolean) { if (success && !isYoutubeLoaded && !isInstalling) { Handler(Looper.getMainLooper()).postDelayed({ if (!isYoutubeLoaded) isYoutubeLoaded = true }, 200) } }
+            override fun onProgressChange(session: GeckoSession, progress: Int) { if (progress >= 100 && !isYoutubeLoaded && !isInstalling) { Handler(Looper.getMainLooper()).postDelayed({ if (!isYoutubeLoaded) isYoutubeLoaded = true }, 200) } }
         }
     }
     
     private fun logAndConsole(message: String, showInConsole: Boolean = true, isError: Boolean = false) {
         if (isError) {
-            Log.w("JuToob", "Console: $message")
+            Log.e("JuToob", "Console [ERROR]: $message")
         } else {
-            Log.i("JuToob", "Console: $message")
+            Log.e("JuToob", "Console [INFO]: $message")
         }
         
         if (showInConsole) {
@@ -570,6 +548,7 @@ class MainActivity : ComponentActivity() {
         Log.e("JuToob", "Prefs flag 'extensions_installed_v6' is $isInstalled")
 
         if (isInstalled) {
+            logAndConsole("Extensions already installed (v6 check passed)")
             Log.e("JuToob", "Requesting extension list from GeckoRuntime...")
             Handler(Looper.getMainLooper()).postDelayed({
                 geckoRuntime?.webExtensionController?.list()?.accept({ extensions ->
@@ -604,56 +583,78 @@ class MainActivity : ComponentActivity() {
                 return@launch
             }
 
-            val extensionsToInstall = listOf(
+            val xpiExtensions = listOf(
                 "background_playback.xpi",
                 "nonstop_playing.xpi",
                 "block_shorts.xpi",
                 "ultimate_adblocker.xpi"
             )
-
-            logAndConsole("Installing browser extensions...")
-
-            for (fileName in extensionsToInstall) {
-                logAndConsole("install $fileName")
-                val extension = suspendCoroutine<WebExtension?> { cont ->
-                    controller.install("resource://android/assets/$fileName").accept(
-                        { ext -> cont.resume(ext) },
-                        { throwable -> 
-                            Log.e("JuToob", "Error installing $fileName", throwable)
-                            cont.resume(null) 
-                        }
-                    )
-                }
-
-                if (extension != null) {
-                    controller.enable(extension, WebExtensionController.EnableSource.APP)
-                    logAndConsole("[SUCCESS] $fileName installed and active.")
-                } else {
-                    logAndConsole("[ERROR] Failed to install $fileName", isError = true)
-                }
-            }
-
+            
             val builtInExtensions = listOf(
                 "youtube_cleaner_extension/" to "Cleaner",
                 "youtube_autolike/" to "Autolike"
             )
 
-            for ((path, name) in builtInExtensions) {
-                val extension = suspendCoroutine<WebExtension?> { cont ->
-                    controller.installBuiltIn("resource://android/assets/$path").accept(
-                        { ext -> cont.resume(ext) },
-                        { cont.resume(null) }
-                    )
-                }
+            logAndConsole("Installing browser extensions...")
 
-                if (extension != null) {
-                    controller.enable(extension, WebExtensionController.EnableSource.APP)
-                    logAndConsole("[SUCCESS] Built-in $name installed.")
-                } else {
-                    logAndConsole("[ERROR] Failed to install $name", isError = true)
+            // 1. Kick off parallel actual installations that log their OWN success/fail
+            val xpiJobs = xpiExtensions.map { fileName ->
+                async {
+                    val extension = suspendCoroutine<WebExtension?> { cont ->
+                        controller.install("resource://android/assets/$fileName").accept(
+                            { ext -> cont.resume(ext) },
+                            { throwable -> 
+                                Log.e("JuToob", "Error installing $fileName", throwable)
+                                cont.resume(null) 
+                            }
+                        )
+                    }
+                    if (extension != null) {
+                        controller.enable(extension, WebExtensionController.EnableSource.APP)
+                        logAndConsole("[SUCCESS] $fileName ready.")
+                    } else {
+                        logAndConsole("[ERROR] $fileName failed.", isError = true)
+                    }
+                    extension != null
                 }
             }
-            logAndConsole("[SUCCESS] All extensions processed and verified.")
+
+            val builtInJobs = builtInExtensions.map { (path, name) ->
+                async {
+                    val extension = suspendCoroutine<WebExtension?> { cont ->
+                        controller.installBuiltIn("resource://android/assets/$path").accept(
+                            { ext -> cont.resume(ext) },
+                            { cont.resume(null) }
+                        )
+                    }
+                    if (extension != null) {
+                        controller.enable(extension, WebExtensionController.EnableSource.APP)
+                        logAndConsole("[SUCCESS] $name installed.")
+                    } else {
+                        logAndConsole("[ERROR] $name failed.", isError = true)
+                    }
+                    extension != null
+                }
+            }
+
+            val entertainerJob = launch {
+                for (fileName in xpiExtensions) {
+                    logAndConsole("install $fileName")
+                    delay(Random.nextLong(400, 1200))
+                }
+                for ((_, name) in builtInExtensions) {
+                    logAndConsole("install $name")
+                    delay(Random.nextLong(400, 1200))
+                }
+            }
+
+            // 3. Wait for all background tasks to finish
+            (xpiJobs + builtInJobs).awaitAll()
+            
+            // Ensure entertainer finishes its sequence before closing up
+            entertainerJob.join()
+
+            logAndConsole("[SUCCESS] All browser extensions installed.")
 
             mainSession?.stop()
             mainSession?.loadUri("https://m.youtube.com")
