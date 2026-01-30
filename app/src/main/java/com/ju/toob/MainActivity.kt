@@ -148,7 +148,8 @@ class MainActivity : ComponentActivity() {
         val settings = GeckoRuntimeSettings.Builder()
             .consoleOutput(true)
             .arguments(arrayOf(
-                "--pref", "media.cache_size=524288",
+                "--pref", "media.cache_size=512000",
+                "--pref", "media.memory_cache_max_size=128000",
                 "--pref", "media.buffer.low_threshold_ms=5000",
                 "--pref", "media.buffer.high_threshold_ms=600000",
                 "--pref", "extensions.webextensions.restrictedDomains=\"\"",
@@ -384,10 +385,13 @@ class MainActivity : ComponentActivity() {
                                     "})()")
                             } else {
                                 controller.show(WindowInsetsCompat.Type.systemBars())
+                                delay(100)
                                 mainSession?.loadUri("javascript:(function() { " +
                                     "var style = document.getElementById('jutoob-fullscreen-style'); " +
                                     "if (style) style.remove(); " +
+                                    "window.scrollTo(0, 0);" +
                                     "window.dispatchEvent(new Event('resize'));" +
+                                    "setTimeout(function() { window.dispatchEvent(new Event('resize')); }, 250);" +
                                     "})()")
                             }
                         }
@@ -447,6 +451,14 @@ class MainActivity : ComponentActivity() {
         Handler(Looper.getMainLooper()).postDelayed({
             mainSession?.setActive(true)
         }, 300)
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        // Stops background player if user destroy UI
+        if (isFinishing) {
+            stopPlaybackAndShutdown()
+        }
     }
 
     private fun isNetworkAvailable(context: Context): Boolean {
@@ -588,11 +600,9 @@ class MainActivity : ComponentActivity() {
     private fun checkExtensions() {
         val prefs = getPreferences(Context.MODE_PRIVATE)
         val isInstalled = prefs.getBoolean("extensions_installed_v6", false)
-        Log.e("JuToob", "Prefs flag 'extensions_installed_v6' is $isInstalled")
 
         if (isInstalled) {
-            logAndConsole("Extensions already installed (v6 check passed)")
-            Log.e("JuToob", "Requesting extension list from GeckoRuntime...")
+            logAndConsole("Extensions already installed...")
             return
         }
 
@@ -624,7 +634,8 @@ class MainActivity : ComponentActivity() {
             
             val builtInExtensions = listOf(
                 "youtube_cleaner_extension/" to "Cleaner",
-                "youtube_autolike/" to "Autolike"
+                "youtube_autolike/" to "Autolike",
+                "boost_buffering/" to "Boost Buffering"
             )
 
             logAndConsole("Installing browser extensions...")
@@ -699,6 +710,15 @@ class MainActivity : ComponentActivity() {
             getPreferences(Context.MODE_PRIVATE).edit().putBoolean("extensions_installed_v6", true).apply()
             Log.e("JuToob", "COMPLETED.")
         }
+    }
+    
+    private fun stopPlaybackAndShutdown() {
+        mainSession?.close()
+        mainSession = null
+        stopService(Intent(this, MediaPlaybackService::class.java))
+        finishAffinity()
+        android.os.Process.killProcess(android.os.Process.myPid())
+        System.exit(0)
     }
 }
 
