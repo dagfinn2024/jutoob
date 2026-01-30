@@ -8,6 +8,9 @@
     }
   },
   "description": "Removes the Open App button from mobile YouTube",
+  "permissions": [
+    "nativeMessaging"
+  ],
   "content_scripts": [
     {
       "matches": ["*://m.youtube.com/*", "*://www.youtube.com/*"],

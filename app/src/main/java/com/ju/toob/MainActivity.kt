@@ -5,9 +5,13 @@ import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
 import android.graphics.Color
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -87,12 +91,11 @@ import org.mozilla.geckoview.GeckoSessionSettings
 import org.mozilla.geckoview.GeckoView
 import org.mozilla.geckoview.WebExtension
 import org.mozilla.geckoview.WebExtensionController
-import java.util.concurrent.atomic.AtomicInteger
-import kotlin.coroutines.resume
-import kotlin.coroutines.suspendCoroutine
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import kotlin.coroutines.resume
+import kotlin.coroutines.suspendCoroutine
 import kotlin.random.Random
 
 class MainActivity : ComponentActivity() {
@@ -106,22 +109,23 @@ class MainActivity : ComponentActivity() {
     private var showBlackOverlay by mutableStateOf(false)
     private var isYoutubeLoaded by mutableStateOf(false)
     private var isNetworkConnected by mutableStateOf(true)
-    private var lastPauseTime = 0L
     
     private val consoleLogs = mutableStateListOf<String>()
     private var showConsole by mutableStateOf(false)
+
+    private var lastHeartbeatTime = System.currentTimeMillis()
+    private var reloadTimeout = 5000L
 
     @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         val splashScreen = installSplashScreen()
         super.onCreate(savedInstanceState)
         
-        startWatchdog()
-        
         isNetworkConnected = isNetworkAvailable(this)
         
         val prefs = getPreferences(Context.MODE_PRIVATE)
-        isInstalling = !prefs.getBoolean("extensions_installed_v6", false)
+        val hasFinishedInstallation = prefs.getBoolean("extensions_installed_v6", false)
+        isInstalling = !hasFinishedInstallation
         if (isInstalling) {
             showBlackOverlay = true
         }
@@ -130,14 +134,6 @@ class MainActivity : ComponentActivity() {
             !isYoutubeLoaded && isNetworkConnected
         }
         
-        // Safety timeout for splash screen and loading state
-        Handler(Looper.getMainLooper()).postDelayed({
-            if (!isYoutubeLoaded && isNetworkConnected) {
-                Log.w("JuToob", "Splash timeout reached, forcing content reveal")
-                isYoutubeLoaded = true
-            }
-        }, 10000)
-
         splashScreen.setOnExitAnimationListener { viewProvider ->
             val fadeOut = ObjectAnimator.ofFloat(viewProvider.view, View.ALPHA, 1f, 0f)
             fadeOut.duration = 400L
@@ -155,7 +151,11 @@ class MainActivity : ComponentActivity() {
                 "--pref", "media.buffer.low_threshold_ms=5000",
                 "--pref", "media.buffer.high_threshold_ms=600000",
                 "--pref", "extensions.webextensions.restrictedDomains=\"\"",
-                "--pref", "extensions.logging.enabled=false"
+                "--pref", "extensions.logging.enabled=false",
+                "--pref", "media.suspend-bkgnd-video.enabled=false",
+                "--pref", "media.autoplay.default=0",
+                "--pref", "media.autoplay.allow-extension-background-pages=true",
+                "--pref", "media.geckoview.autoplay.enabled=true"
             ))
             .build()
         
@@ -191,6 +191,9 @@ class MainActivity : ComponentActivity() {
         })
         
         checkExtensions()
+        startHeartbeatMonitor()
+        requestAudioFocus()
+        startPlaybackService()
 
         setContent {
             JuToobTheme {
@@ -217,80 +220,85 @@ class MainActivity : ComponentActivity() {
                             isInstalling = isInstalling
                         )
 
-                        // Persistent Black Overlay during installation
-                        AnimatedVisibility(
-                            visible = showBlackOverlay,
-                            enter = fadeIn(),
-                            exit = fadeOut(animationSpec = tween(1000))
-                        ) {
-                            Box(modifier = Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Color.Black))
-                        }
-
-                        // Console Popup
-                        AnimatedVisibility(
-                            visible = showConsole,
-                            enter = fadeIn() + scaleIn(),
-                            exit = fadeOut() + scaleOut(),
-                            modifier = Modifier.align(Alignment.Center)
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .padding(16.dp)
-                                    .shadow(24.dp, RoundedCornerShape(8.dp))
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(androidx.compose.ui.graphics.Color(0xFF0C0C0C))
-                                    .border(1.dp, androidx.compose.ui.graphics.Color(0xFF333333), RoundedCornerShape(8.dp))
-                                    .fillMaxWidth(0.95f)
-                                    .fillMaxHeight(0.7f)
-                                    .padding(12.dp)
+                        // ONLY include installation UI components if the app hasn't been successfully set up yet.
+                        // On the second run onwards, 'needsInstallationUI' will be false, and these will never be created.
+                        val needsInstallationUI = remember { !hasFinishedInstallation }
+                        if (needsInstallationUI) {
+                            // Persistent Black Overlay during installation
+                            AnimatedVisibility(
+                                visible = showBlackOverlay,
+                                enter = fadeIn(),
+                                exit = fadeOut(animationSpec = tween(1000))
                             ) {
-                                val listState = rememberLazyListState()
-                                LaunchedEffect(consoleLogs.size) {
-                                    if (consoleLogs.isNotEmpty()) {
-                                        listState.animateScrollToItem(consoleLogs.size - 1)
-                                    }
-                                }
-                                
-                                Column {
-                                    Box(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(bottom = 8.dp)
-                                    ) {
-                                        Column {
-                                            Text(
-                                                text = "jutoob@android:~/extensions$",
-                                                color = androidx.compose.ui.graphics.Color(0xFF00FF00).copy(alpha = 0.7f),
-                                                fontSize = 10.sp,
-                                                fontFamily = FontFamily.Monospace,
-                                                modifier = Modifier.padding(bottom = 4.dp)
-                                            )
-                                            Box(
-                                                modifier = Modifier
-                                                    .fillMaxWidth()
-                                                    .background(androidx.compose.ui.graphics.Color(0xFF333333))
-                                                    .padding(top = 1.dp)
-                                            )
+                                Box(modifier = Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Color.Black))
+                            }
+
+                            // Console Popup
+                            AnimatedVisibility(
+                                visible = showConsole,
+                                enter = fadeIn() + scaleIn(),
+                                exit = fadeOut() + scaleOut(),
+                                modifier = Modifier.align(Alignment.Center)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .padding(16.dp)
+                                        .shadow(24.dp, RoundedCornerShape(8.dp))
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(androidx.compose.ui.graphics.Color(0xFF0C0C0C))
+                                        .border(1.dp, androidx.compose.ui.graphics.Color(0xFF333333), RoundedCornerShape(8.dp))
+                                        .fillMaxWidth(0.95f)
+                                        .fillMaxHeight(0.7f)
+                                        .padding(12.dp)
+                                ) {
+                                    val listState = rememberLazyListState()
+                                    LaunchedEffect(consoleLogs.size) {
+                                        if (consoleLogs.isNotEmpty()) {
+                                            listState.animateScrollToItem(consoleLogs.size - 1)
                                         }
                                     }
                                     
-                                    LazyColumn(
-                                        state = listState,
-                                        modifier = Modifier.fillMaxSize()
-                                    ) {
-                                        items(consoleLogs) { logLine ->
-                                            Text(
-                                                text = if (logLine.startsWith("[")) logLine else "> $logLine",
-                                                color = when {
-                                                    logLine.contains("[ERROR]") -> androidx.compose.ui.graphics.Color(0xFFFF5555)
-                                                    logLine.contains("[SUCCESS]") -> androidx.compose.ui.graphics.Color(0xFF55FF55)
-                                                    else -> androidx.compose.ui.graphics.Color(0xFFBBBBBB)
-                                                },
-                                                fontFamily = FontFamily.Monospace,
-                                                fontSize = 9.sp,
-                                                lineHeight = 12.sp,
-                                                modifier = Modifier.padding(bottom = 2.dp)
-                                            )
+                                    Column {
+                                        Box(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(bottom = 8.dp)
+                                        ) {
+                                            Column {
+                                                Text(
+                                                    text = "jutoob@android:~/extensions$",
+                                                    color = androidx.compose.ui.graphics.Color(0xFF00FF00).copy(alpha = 0.7f),
+                                                    fontSize = 10.sp,
+                                                    fontFamily = FontFamily.Monospace,
+                                                    modifier = Modifier.padding(bottom = 4.dp)
+                                                )
+                                                Box(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .background(androidx.compose.ui.graphics.Color(0xFF333333))
+                                                        .padding(top = 1.dp)
+                                                )
+                                            }
+                                        }
+                                        
+                                        LazyColumn(
+                                            state = listState,
+                                            modifier = Modifier.fillMaxSize()
+                                        ) {
+                                            items(consoleLogs) { logLine ->
+                                                Text(
+                                                    text = if (logLine.startsWith("[")) logLine else "> $logLine",
+                                                    color = when {
+                                                        logLine.contains("[ERROR]") -> androidx.compose.ui.graphics.Color(0xFFFF5555)
+                                                        logLine.contains("[SUCCESS]") -> androidx.compose.ui.graphics.Color(0xFF55FF55)
+                                                        else -> androidx.compose.ui.graphics.Color(0xFFBBBBBB)
+                                                    },
+                                                    fontFamily = FontFamily.Monospace,
+                                                    fontSize = 9.sp,
+                                                    lineHeight = 12.sp,
+                                                    modifier = Modifier.padding(bottom = 2.dp)
+                                                )
+                                            }
                                         }
                                     }
                                 }
@@ -425,40 +433,17 @@ class MainActivity : ComponentActivity() {
 
     override fun onPause() {
         super.onPause()
-        lastPauseTime = System.currentTimeMillis()
+        // We keep session active for background audio support
+        // mainSession?.setActive(false)
     }
 
     override fun onResume() {
         super.onResume()
-        if (lastPauseTime != 0L && (System.currentTimeMillis() - lastPauseTime > 300000)) {
-            Log.e("JuToob", "RESUME: App was paused for > 5 mins. Forcing refresh.")
-            mainSession?.reload()
-        }
-    }
-
-    private fun startWatchdog() {
-        val mainHandler = Handler(Looper.getMainLooper())
-        val watchdogThread = Thread {
-            while (true) {
-                val ping = AtomicInteger(0)
-                mainHandler.post { ping.incrementAndGet() }
-                try {
-                    Thread.sleep(15000)
-                } catch (e: InterruptedException) {
-                    break
-                }
-                if (ping.get() == 0 && this.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
-                    Log.e("JuToob", "WATCHDOG: Main thread unresponsive. Forcing restart.")
-                    val intent = Intent(this@MainActivity, MainActivity::class.java).apply {
-                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
-                    }
-                    startActivity(intent)
-                    Runtime.getRuntime().exit(0)
-                } 
-            }
-        }
-        watchdogThread.isDaemon = true
-        watchdogThread.start()
+        mainSession?.setActive(true)
+        // Ensure active state after surface is likely ready
+        Handler(Looper.getMainLooper()).postDelayed({
+            mainSession?.setActive(true)
+        }, 300)
     }
 
     private fun isNetworkAvailable(context: Context): Boolean {
@@ -473,8 +458,61 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun requestAudioFocus() {
+        val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val audioAttributes = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                .build()
+            val focusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                .setAudioAttributes(audioAttributes)
+                .setAcceptsDelayedFocusGain(true)
+                .setOnAudioFocusChangeListener { /* Handle change if needed */ }
+                .build()
+            audioManager.requestAudioFocus(focusRequest)
+        } else {
+            @Suppress("DEPRECATION")
+            audioManager.requestAudioFocus(null, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN)
+        }
+    }
+
+    private fun startPlaybackService() {
+        val serviceIntent = Intent(this, MediaPlaybackService::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(serviceIntent)
+        } else {
+            startService(serviceIntent)
+        }
+    }
+
+    private fun startHeartbeatMonitor() {
+        lifecycleScope.launch {
+            while (true) {
+                delay(1000)
+                if (isYoutubeLoaded && !isInstalling && isNetworkConnected) {
+                    val currentTime = System.currentTimeMillis()
+                    if (currentTime - lastHeartbeatTime > reloadTimeout) {
+                        Log.e("JuToob", "Heartbeat lost! Re-loading session.")
+                        lastHeartbeatTime = currentTime
+                        mainSession?.reload()
+                    }
+                } else {
+                    lastHeartbeatTime = System.currentTimeMillis()
+                }
+            }
+        }
+    }
+
     private fun setupMainSessionDelegates(session: GeckoSession) {
-        session.contentDelegate = object : GeckoSession.ContentDelegate {}
+        session.contentDelegate = object : GeckoSession.ContentDelegate {
+            override fun onTitleChange(session: GeckoSession, title: String?) {
+                if (title?.startsWith("JUTOOB") == true) {
+                    lastHeartbeatTime = System.currentTimeMillis()
+                    //Log.e("JuToob", "Heartbeat: $title")
+                }
+            }
+        }
         session.scrollDelegate = object : GeckoSession.ScrollDelegate {
             override fun onScrollChanged(session: GeckoSession, scrollX: Int, scrollY: Int) {
                 if (scrollY > lastScrollY + 10 && scrollY > 100) {
@@ -496,27 +534,21 @@ class MainActivity : ComponentActivity() {
             }
             override fun onLocationChange(s: GeckoSession, url: String?, p: List<GeckoSession.PermissionDelegate.ContentPermission>, g: Boolean) {
                  isHomePage = url?.contains("/watch") != true
+                 
+                 when {
+                    url?.contains("accounts.google.com") == true -> {
+                        Log.e("JuToob", "User is logging in. Heartbeat expected to stop.")
+                        reloadTimeout = 600000L // 10 minutes
+                    }
+                    url?.contains("m.youtube.com") == true -> {
+                        Log.e("JuToob", "User is on YouTube. Heartbeat should resume.")
+                        reloadTimeout = 5000L // 5 seconds
+                    }
+                 }
+
                  val paddingValue = if (isHomePage) "18px" else "0px"
                  s.loadUri("javascript:(function() { " +
                         "try { Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36', configurable: false }); } catch(e) {} " +
-                        "if (window.jutoobWatchdog) clearInterval(window.jutoobWatchdog); " +
-                        "window.jutoobWatchdog = setInterval(() => { " +
-                        "  const v = document.querySelector('video'); " +
-                        "  const app = document.querySelector('ytm-app, #app, .ytm-app'); " +
-                        "  if (!v && !app) { " +
-                        "     window.emptyCount = (window.emptyCount || 0) + 1; " +
-                        "     if (window.emptyCount >= 4) { location.reload(); } " +
-                        "  } else { " +
-                        "     window.emptyCount = 0; " +
-                        "     if (v && location.href.includes('/watch') && !v.paused && !v.ended && !document.querySelector('.ad-showing')) { " +
-                        "        if (v.currentTime === window.lastVTime) { " +
-                        "          window.stallCount = (window.stallCount || 0) + 1; " +
-                        "          if (window.stallCount >= 6) { location.reload(); } " +
-                        "        } else { window.stallCount = 0; } " +
-                        "        window.lastVTime = v.currentTime; " +
-                        "     } " +
-                        "  } " +
-                        "}, 5000); " +
                         "var bannerStyle = document.getElementById('jutoob-banner-style'); if (!bannerStyle) { bannerStyle = document.createElement('style'); bannerStyle.id = 'jutoob-banner-style'; document.head.appendChild(bannerStyle); } " +
                         "bannerStyle.innerHTML = ` ytm-app-banner, .open-in-app-banner, ytm-mealbar-promo-renderer, ytd-app-promo-renderer, ytd-smart-app-banner-renderer, ytd-banner-promo-renderer, tp-yt-paper-dialog { display: none !important; } .mobile-topbar-header, ytm-mobile-topbar-renderer { padding-right: $paddingValue !important; } `; " +
                         "})()")
@@ -527,7 +559,7 @@ class MainActivity : ComponentActivity() {
             override fun onProgressChange(session: GeckoSession, progress: Int) { if (progress >= 100 && !isYoutubeLoaded && !isInstalling) { Handler(Looper.getMainLooper()).postDelayed({ if (!isYoutubeLoaded) isYoutubeLoaded = true }, 200) } }
         }
     }
-    
+
     private fun logAndConsole(message: String, showInConsole: Boolean = true, isError: Boolean = false) {
         if (isError) {
             Log.e("JuToob", "Console [ERROR]: $message")
@@ -550,17 +582,6 @@ class MainActivity : ComponentActivity() {
         if (isInstalled) {
             logAndConsole("Extensions already installed (v6 check passed)")
             Log.e("JuToob", "Requesting extension list from GeckoRuntime...")
-            Handler(Looper.getMainLooper()).postDelayed({
-                geckoRuntime?.webExtensionController?.list()?.accept({ extensions ->
-                    if (extensions.isNullOrEmpty()) {
-                        Log.e("JuToob", "NO EXTENSIONS FOUND IN GECKO!")
-                    } else {
-                        Log.e("JuToob", "FOUND ${extensions.size} EXTENSIONS")
-                    }
-                }, { e ->
-                    Log.e("JuToob", "FAILED TO LIST EXTENSIONS", e)
-                })
-            }, 500)
             return
         }
 
@@ -629,6 +650,7 @@ class MainActivity : ComponentActivity() {
                     }
                     if (extension != null) {
                         controller.enable(extension, WebExtensionController.EnableSource.APP)
+                        delay(Random.nextLong(1000, 2000))
                         logAndConsole("[SUCCESS] $name installed.")
                     } else {
                         logAndConsole("[ERROR] $name failed.", isError = true)
@@ -638,13 +660,13 @@ class MainActivity : ComponentActivity() {
             }
 
             val entertainerJob = launch {
-                for (fileName in xpiExtensions) {
-                    logAndConsole("install $fileName")
-                    delay(Random.nextLong(400, 1200))
-                }
                 for ((_, name) in builtInExtensions) {
                     logAndConsole("install $name")
-                    delay(Random.nextLong(400, 1200))
+                    delay(Random.nextLong(400, 800))
+                }
+                for (fileName in xpiExtensions) {
+                    logAndConsole("install $fileName")
+                    delay(Random.nextLong(1000, 2000))
                 }
             }
 
@@ -686,33 +708,42 @@ fun YouTubeGeckoPlayer(
                     runtime.webExtensionController.setTabActive(session, true)
                 }
                 Lifecycle.Event.ON_PAUSE -> {
-                    session.setActive(false)
+                    // We keep session active for background audio support
+                    // session.setActive(false)
                 }
                 else -> {}
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         
-        // Ensure initial state
-        session.setActive(true)
-        runtime.webExtensionController.setTabActive(session, true)
-        
         onDispose { 
             lifecycleOwner.lifecycle.removeObserver(observer)
-            session.setActive(false)
         }
     }
+
     BackHandler { if (canGoBackState) session.goBack() }
+    
     AndroidView(
         modifier = modifier,
         factory = { ctx ->
             GeckoView(ctx).apply {
                 setSession(session)
                 setBackgroundColor(Color.BLACK)
+                
+                // Ensure session is active when window focus is regained (unlock/resume)
+                viewTreeObserver.addOnWindowFocusChangeListener { hasFocus ->
+                    if (hasFocus && !isInstalling) {
+                        session.setActive(true)
+                    }
+                }
             }
         },
         update = { view ->
             view.setBackgroundColor(Color.BLACK)
+            // Nudge session activity if view is visible but Gecko might be stalled
+            if (view.isShown && !isInstalling) {
+                session.setActive(true)
+            }
         }
     )
 }

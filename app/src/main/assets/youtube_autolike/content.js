@@ -25,21 +25,21 @@
 
     function isSubscribed(btn) {
         if (!btn) return false;
-        
+
         // 1. Check attributes
         if (btn.hasAttribute("subscribed")) return true;
-        
+
         // 2. Check classes (common in new UI)
         if (btn.classList.contains("yt-spec-button-shape-next--tonal")) return true;
-        
+
         // 3. Check text content
         const text = btn.innerText || btn.textContent || "";
         if (text.trim().toLowerCase().includes("subscribed")) return true;
-        
+
         // 4. Check aria-label
         const ariaLabel = btn.getAttribute("aria-label") || "";
         if (ariaLabel.toLowerCase().includes("unsubscribe")) return true;
-        
+
         return false;
     }
 
@@ -97,4 +97,73 @@
         checkCount = 0;
         setTimeout(checkAndLike, 192000);
     });
+
+    const PREFIX = "JUTOOB";
+    let userPaused = false;
+
+    function nowTitle() {
+        document.title = PREFIX + Date.now();
+    }
+
+    function videoTitle(v) {
+        const time = (v && !isNaN(v.currentTime)) ? Math.floor(v.currentTime * 1000) : Date.now();
+        document.title = PREFIX + time;
+    }
+
+    function ensurePlaying(v) {
+        if (!v || v.ended) return;
+        if (v.readyState >= 2 && (v.paused || v.ended)) {
+            v.play().catch(() => {
+                v.muted = true;
+                v.play().then(() => {
+                    setTimeout(() => { v.muted = false; }, 250);
+                }).catch(e => console.log("Playback failed:", e));
+            });
+        }
+    }
+
+    document.addEventListener("pause", e => {
+        if (e.target instanceof HTMLVideoElement) {
+          userPaused = true;
+        }
+      }, true);
+
+    document.addEventListener("play", e => {
+        if (e.target instanceof HTMLVideoElement) {
+          userPaused = false;
+        }
+      }, true);
+
+    document.addEventListener("visibilitychange", () => {
+        const v = document.querySelector("video");
+        if (document.visibilityState === "hidden" && v && !userPaused) {
+            ensurePlaying(v);
+        }
+    });
+
+    function isLoginPage() {
+        return window.location.hostname.includes("accounts.google.com") ||
+               !!document.querySelector('form[action*="signin"]');
+    }
+
+    setInterval(() => {
+        if (isLoginPage()) {
+            document.title = "JUTOOB_LOGIN" + Date.now();
+            return;
+        }
+            const v = document.querySelector("video");
+        if (!v || !v.src || v.src === "" || v.readyState === 0) {
+            nowTitle();
+            return;
+        }
+        if (!v.paused && !v.ended) {
+            videoTitle(v);
+        } else {
+            nowTitle();
+            if (!userPaused) {
+              ensurePlaying(v);
+            }
+        }
+    }, 1000);
+
 })();
