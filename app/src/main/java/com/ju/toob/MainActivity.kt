@@ -114,7 +114,8 @@ class MainActivity : ComponentActivity() {
     private var showConsole by mutableStateOf(false)
 
     private var lastHeartbeatTime = System.currentTimeMillis()
-    private var reloadTimeout = 5000L
+    private var reloadTimeout = 30000L
+    private var isFirstLoad = true
 
     @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -175,7 +176,9 @@ class MainActivity : ComponentActivity() {
         mainSession?.apply {
             open(geckoRuntime!!)
             if (isNetworkConnected) {
-                loadUri("https://m.youtube.com")
+                // Pass a flag to the initial URL so the content script knows to check login status
+                // and redirect to trending if needed. This works around the lack of CookieManager.
+                loadUri("https://m.youtube.com/?jutoob_startup=1")
             }
         }
 
@@ -509,7 +512,14 @@ class MainActivity : ComponentActivity() {
             override fun onTitleChange(session: GeckoSession, title: String?) {
                 if (title?.startsWith("JUTOOB") == true) {
                     lastHeartbeatTime = System.currentTimeMillis()
-                    //Log.e("JuToob", "Heartbeat: $title")
+                    if (isFirstLoad) {
+                        isFirstLoad = false
+                        reloadTimeout = 30000L // Still allow buffer for initial settling
+                        Handler(Looper.getMainLooper()).postDelayed({
+                            reloadTimeout = 5000L
+                        }, 5000)
+                    }
+                    //Log.e("JuToob", "Heartbeat: $title $reloadTimeout")
                 }
             }
         }
@@ -541,8 +551,9 @@ class MainActivity : ComponentActivity() {
                         reloadTimeout = 600000L // 10 minutes
                     }
                     url?.contains("m.youtube.com") == true -> {
-                        Log.e("JuToob", "User is on YouTube. Heartbeat should resume.")
-                        reloadTimeout = 5000L // 5 seconds
+                        //Log.e("JuToob", "User is on YouTube. Heartbeat should resume.")
+                        // If we haven't successfully seen a heartbeat yet, use a longer timeout
+                        reloadTimeout = if (isFirstLoad) 30000L else 5000L
                     }
                  }
 
@@ -679,7 +690,7 @@ class MainActivity : ComponentActivity() {
             logAndConsole("[SUCCESS] All browser extensions installed.")
 
             mainSession?.stop()
-            mainSession?.loadUri("https://m.youtube.com")
+            mainSession?.loadUri("https://m.youtube.com/results?search_query=trending")
             isInstalling = false
             delay(2000)
             showConsole = false

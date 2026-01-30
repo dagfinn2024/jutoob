@@ -1,17 +1,16 @@
 (function () {
-
   function removeAppPromo() {
     const selectors = [
-      'ytm-app-promo',
-      'ytm-open-app',
+      "ytm-app-promo",
+      "ytm-open-app",
       'a[href^="intent://"]',
       '[aria-label*="Open App"]',
-      '.ytm-app-promo .mobile-topbar-header',
-      'ytm-mobile-topbar-renderer ytm-app-promo'
+      ".ytm-app-promo .mobile-topbar-header",
+      "ytm-mobile-topbar-renderer ytm-app-promo",
     ];
 
-    selectors.forEach(sel => {
-      document.querySelectorAll(sel).forEach(el => el.remove());
+    selectors.forEach((sel) => {
+      document.querySelectorAll(sel).forEach((el) => el.remove());
     });
   }
 
@@ -22,6 +21,6 @@
   });
   observer.observe(document.documentElement, {
     childList: true,
-    subtree: true
+    subtree: true,
   });
 })();
