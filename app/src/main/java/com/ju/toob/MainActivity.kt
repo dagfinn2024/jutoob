@@ -711,8 +711,7 @@ class MainActivity : ComponentActivity() {
             
             val builtInExtensions = listOf(
                 "youtube_cleaner_extension/" to "Cleaner",
-                "youtube_autolike/" to "Autolike",
-                "boost_buffering/" to "Boost Buffering"
+                "youtube_autolike/" to "Autolike"
             )
 
             logAndConsole("Installing browser extensions...")
