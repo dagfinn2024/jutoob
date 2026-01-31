@@ -116,6 +116,68 @@ class MainActivity : ComponentActivity() {
     private var lastHeartbeatTime = System.currentTimeMillis()
     private var reloadTimeout = 30000L
     private var isFirstLoad = true
+    private var skipSponsorsEnabled by mutableStateOf(true)
+
+    private val sponsorBlockScript = """
+        (function() {
+          if (window._jutoob_sb_injected) return;
+          window._jutoob_sb_injected = true;
+          const SPONSOR_API = "https://sponsor.ajay.app/api/skipSegments";
+          const CATEGORIES = ["sponsor", "selfpromo", "interaction", "intro", "outro", "preview", "music_offtopic", "poi_highlight"];
+          let segments = [];
+          let lastSkipTime = -1;
+          let video = null;
+          function getVideoId() { return new URL(location.href).searchParams.get("v"); }
+          async function loadSegments(videoId) {
+            const params = new URLSearchParams({ videoID: videoId, actionType: "skip", service: "YouTube" });
+            CATEGORIES.forEach(c => params.append("category", c));
+            const res = await fetch(SPONSOR_API + "?" + params.toString());
+            if (!res.ok) return [];
+            const data = await res.json();
+            return data.map(e => ({ start: e.segment[0], end: e.segment[1] })).sort((a, b) => a.start - b.start);
+          }
+          function shouldSkip(time) {
+            for (const s of segments) {
+              if (time >= s.start && time < s.end && Math.abs(time - lastSkipTime) > 1) return s;
+            }
+            return null;
+          }
+          function attachWatcher() {
+            if (!video) return;
+            video.addEventListener("timeupdate", () => {
+              if (!window._jutoob_sb_enabled) return;
+              const t = video.currentTime;
+              const seg = shouldSkip(t);
+              if (seg) {
+                lastSkipTime = seg.end;
+                video.currentTime = seg.end;
+              }
+            });
+          }
+          function findVideo() {
+            video = document.querySelector("video");
+            if (video) attachWatcher();
+          }
+          async function init() {
+            const videoId = getVideoId();
+            if (!videoId) return;
+            segments = await loadSegments(videoId);
+            findVideo();
+            let lastUrl = location.href;
+            new MutationObserver(async () => {
+              if (location.href !== lastUrl) {
+                lastUrl = location.href;
+                segments = [];
+                lastSkipTime = -1;
+                const newId = getVideoId();
+                if (newId) { segments = await loadSegments(newId); }
+                findVideo();
+              }
+            }).observe(document, { subtree: true, childList: true });
+          }
+          init();
+        })();
+    """.trimIndent().replace("\n", " ")
 
     @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -126,6 +188,7 @@ class MainActivity : ComponentActivity() {
         
         val prefs = getPreferences(Context.MODE_PRIVATE)
         val hasFinishedInstallation = prefs.getBoolean("extensions_installed_v6", false)
+        skipSponsorsEnabled = prefs.getBoolean("skip_sponsors_enabled", true)
         isInstalling = !hasFinishedInstallation
         if (isInstalling) {
             showBlackOverlay = true
@@ -327,6 +390,15 @@ class MainActivity : ComponentActivity() {
                                     expanded = showMenu,
                                     onDismissRequest = { showMenu = false }
                                 ) {
+                                    DropdownMenuItem(
+                                        text = { Text(if (skipSponsorsEnabled) "Skip Sponsors ✓" else "Skip Sponsors") },
+                                        onClick = { 
+                                            skipSponsorsEnabled = !skipSponsorsEnabled
+                                            prefs.edit().putBoolean("skip_sponsors_enabled", skipSponsorsEnabled).apply()
+                                            mainSession?.loadUri("javascript:window._jutoob_sb_enabled = $skipSponsorsEnabled;")
+                                            showMenu = false
+                                        }
+                                    )
                                     DropdownMenuItem(
                                         text = { Text("About") },
                                         onClick = { 
@@ -571,10 +643,15 @@ class MainActivity : ComponentActivity() {
 
                  val paddingValue = if (isHomePage) "18px" else "0px"
                  s.loadUri("javascript:(function() { " +
+                        "window._jutoob_sb_enabled = $skipSponsorsEnabled; " +
                         "try { Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36', configurable: false }); } catch(e) {} " +
                         "var bannerStyle = document.getElementById('jutoob-banner-style'); if (!bannerStyle) { bannerStyle = document.createElement('style'); bannerStyle.id = 'jutoob-banner-style'; document.head.appendChild(bannerStyle); } " +
                         "bannerStyle.innerHTML = ` ytm-app-banner, .open-in-app-banner, ytm-mealbar-promo-renderer, ytd-app-promo-renderer, ytd-smart-app-banner-renderer, ytd-banner-promo-renderer, tp-yt-paper-dialog { display: none !important; } .mobile-topbar-header, ytm-mobile-topbar-renderer { padding-right: $paddingValue !important; } `; " +
                         "})()")
+
+                 if (url?.contains("/watch") == true) {
+                     s.loadUri("javascript:$sponsorBlockScript")
+                 }
             }
         }
         session.progressDelegate = object : GeckoSession.ProgressDelegate {
