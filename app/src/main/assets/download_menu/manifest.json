@@ -1,0 +1,42 @@
+{
+  "manifest_version": 2,
+  "name": "YouTube MP3/MP4 Downloader",
+  "short_name": "Downloader",
+  "version": "1.0.0",
+  "description": "Download YouTube videos as MP3 audio or MP4 video.",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "browser_action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png"
+    },
+    "default_title": "Downloader"
+  },
+  "background": {
+    "scripts": [
+      "background.js"
+    ],
+    "persistent": false
+  },
+  "permissions": [
+    "activeTab"
+  ],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "jutoob@extension.local",
+      "strict_min_version": "142.0",
+      "data_collection_permissions": {
+        "required": [
+          "none"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,102 @@
+Manifest-Version: 1.0
+
+Name: popup.js
+Digest-Algorithms: SHA1 SHA256
+SHA1-Digest: PtWyi6c42tIUz5kD2IddDgbqzzA=
+SHA256-Digest: UUgtRgB5q5drsVxcpAcMNNrIY02j0nRWVZdQ0zlyGp0=
+
+Name: LICENSE
+Digest-Algorithms: SHA1 SHA256
+SHA1-Digest: kMpaw5KSaqtKdnbesd/uwcmkKA8=
+SHA256-Digest: FMqAjSluDhyJ7/fn9Xe6HRlmtQ8iWFlSxMsp6wt+iqo=
+
+Name: popup.html
+Digest-Algorithms: SHA1 SHA256
+SHA1-Digest: X1knPZ+Cgqn3deGbNjEyx6J+kfA=
+SHA256-Digest: XN7pM+tuzG5XjnegexNQHjO3u3M+odtQbEMyt8R2W4w=
+
+Name: manifest.json
+Digest-Algorithms: SHA1 SHA256
+SHA1-Digest: F6a7LOSzc4YbXIEfjMBXKzjn3+c=
+SHA256-Digest: rYMfN6PebWFEIAdcxNNxpznmwvR9WKdgHfGUz/sxljo=
+
+Name: package.json
+Digest-Algorithms: SHA1 SHA256
+SHA1-Digest: VqGzo5KlgPk72kzSUSPgNbhhzHo=
+SHA256-Digest: lN/Me9uPs3NqxT6ydMOGCi0cgbd3Ka6C5xPCPclXKdw=
+
+Name: content-script.js
+Digest-Algorithms: SHA1 SHA256
+SHA1-Digest: SE/oimLjulp5SS+FNMwZA/fqUxM=
+SHA256-Digest: OhLpd8/stfOg+vMV3lonSoN9oVuatD6lq6UynZlKR8s=
+
+Name: background.js
+Digest-Algorithms: SHA1 SHA256
+SHA1-Digest: c4EtPnSF1I+s+GsxCgS286OSmRw=
+SHA256-Digest: otrNeZA6oBYehMJ10joAwoLXajnEIKQxM5Fo1gV0U4o=
+
+Name: README.md
+Digest-Algorithms: SHA1 SHA256
+SHA1-Digest: qmp4VyfPy7SxV+JyvzE1K5Dr+jU=
+SHA256-Digest: mDoWTgyTmPeWaoWVqr7y8F9x9Al/LMZUC4jelIAhMco=
+
+Name: package-lock.json
+Digest-Algorithms: SHA1 SHA256
+SHA1-Digest: u1C+Fj05DdHKunY5qbbziOK+gA8=
+SHA256-Digest: DiCsz1M3HyWWYyAoo1XH4U4izK/s6yhbf0SANpcrtkQ=
+
+Name: RELEASE_NOTES_1.1.1.md
+Digest-Algorithms: SHA1 SHA256
+SHA1-Digest: wpVqUuj5vxm8HUbG9pNA8I+7OBY=
+SHA256-Digest: 9lhIdj53BR7RJl/GUleRQoj1wAU65GxtlAq2NAjjfs8=
+
+Name: icons/android-chrome-192x192.png
+Digest-Algorithms: SHA1 SHA256
+SHA1-Digest: YmFsUfn8pp2+JYpcDnublFp8qGM=
+SHA256-Digest: oEkii+/826H8H8D32hhxvvezmXGnAyEvD4n1D1s43Xc=
+
+Name: icons/favicon-16x16.png
+Digest-Algorithms: SHA1 SHA256
+SHA1-Digest: 3txpL1BBIjqGgWv1wvAHE0UCaQg=
+SHA256-Digest: v8gLYs6GoWTW6lGri0HmLZIaVG1+EGXBI+GDzbcDHJI=
+
+Name: icons/android-chrome-512x512.png
+Digest-Algorithms: SHA1 SHA256
+SHA1-Digest: W6+EG/aK6M4lPht1hH2jLm/7qRA=
+SHA256-Digest: CbvZK0d/PPSFzdJrEPKEjPpHPPuao8otYS81QiiHHq0=
+
+Name: icons/favicon-32x32.png
+Digest-Algorithms: SHA1 SHA256
+SHA1-Digest: TIm+6Gur9zZlqfrRNYctCSviv0g=
+SHA256-Digest: q2XDc987aj38jzz5RYqbQWN+GmHap+1tfIArWqkV0EY=
+
+Name: icons/site.webmanifest
+Digest-Algorithms: SHA1 SHA256
+SHA1-Digest: vzG6+RvdL83iSkXj8qG+M3M8b2k=
+SHA256-Digest: ep4Hzh9zhmiZF2At3Fp1dQrYQuYF/3ZPZxc1KcGBvwQ=
+
+Name: icons/apple-touch-icon.png
+Digest-Algorithms: SHA1 SHA256
+SHA1-Digest: r8UPPA/eGAgWuKokUwyImFd61GU=
+SHA256-Digest: LiHlRTe80+HFoYsIY+f7FaScofTKmA0agwquIf+lvmA=
+
+Name: icons/favicon.ico
+Digest-Algorithms: SHA1 SHA256
+SHA1-Digest: F9EpbFsTDqG+VlhhyO41txJnN2U=
+SHA256-Digest: lxW4/fndIXrY84Mu/GGjiUj7OW2XCMTi0RnxUls9S4I=
+
+Name: images/before.png
+Digest-Algorithms: SHA1 SHA256
+SHA1-Digest: 1rc2b6UH/g1OtB7lfC3lJ1WK6Zw=
+SHA256-Digest: RakkWAn91cpTTVxPajdOG2JlcYLDKYy56UZJ/M5ymnA=
+
+Name: images/after.png
+Digest-Algorithms: SHA1 SHA256
+SHA1-Digest: PlcY+sb/y4BefYE3D0YO7IDaxLE=
+SHA256-Digest: Y8b1Szs19mbgVvYUQp2Tr5Te23xxBJLM5KY6xojuvCg=
+
+Name: images/get-the-addon.webp
+Digest-Algorithms: SHA1 SHA256
+SHA1-Digest: e5qoqWwiOhYwGi+fjDgGmZ4BjL0=
+SHA256-Digest: BjGhbI9g8SO88YM3X3nf2Vd7Dq+bvHh3NadahSOCnUk=
+
