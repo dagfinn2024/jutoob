@@ -1,6 +1,7 @@
 package com.ju.toob
 
 import android.animation.ObjectAnimator
+import android.app.DownloadManager
 import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
@@ -13,11 +14,17 @@ import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.View
 import android.view.animation.AccelerateInterpolator
+import android.webkit.URLUtil
+import android.webkit.WebChromeClient
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -32,9 +39,11 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -69,6 +78,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.animation.doOnEnd
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.core.view.WindowCompat
@@ -94,9 +105,13 @@ import org.mozilla.geckoview.WebExtensionController
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import java.io.File
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 import kotlin.random.Random
+import android.util.Base64
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
 
 class MainActivity : ComponentActivity() {
     private var geckoRuntime: GeckoRuntime? = null
@@ -117,6 +132,11 @@ class MainActivity : ComponentActivity() {
     private var reloadTimeout = 30000L
     private var isFirstLoad = true
     private var skipSponsorsEnabled by mutableStateOf(true)
+    
+    private var showDownloadDialog by mutableStateOf(false)
+    private var currentVideoId by mutableStateOf<String?>(null)
+    private var currentVideoTitle by mutableStateOf<String>("jutoob_video")
+    private var isLiveStream by mutableStateOf(false)
 
     private val sponsorBlockScript = """
         (function() {
@@ -240,8 +260,6 @@ class MainActivity : ComponentActivity() {
         mainSession?.apply {
             open(geckoRuntime!!)
             if (isNetworkConnected) {
-                // Pass a flag to the initial URL so the content script knows to check login status
-                // and redirect to trending if needed. This works around the lack of CookieManager.
                 loadUri("https://m.youtube.com/?jutoob_startup=1")
             }
         }
@@ -288,10 +306,8 @@ class MainActivity : ComponentActivity() {
                         )
 
                         // ONLY include installation UI components if the app hasn't been successfully set up yet.
-                        // On the second run onwards, 'needsInstallationUI' will be false, and these will never be created.
                         val needsInstallationUI = remember { !hasFinishedInstallation }
                         if (needsInstallationUI) {
-                            // Persistent Black Overlay during installation
                             AnimatedVisibility(
                                 visible = showBlackOverlay,
                                 enter = fadeIn(),
@@ -300,7 +316,6 @@ class MainActivity : ComponentActivity() {
                                 Box(modifier = Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Color.Black))
                             }
 
-                            // Console Popup
                             AnimatedVisibility(
                                 visible = showConsole,
                                 enter = fadeIn() + scaleIn(),
@@ -372,51 +387,53 @@ class MainActivity : ComponentActivity() {
                             }
                         }
 
-                        AnimatedVisibility(
-                            visible = !isLandscape && isHomePage && isHeaderVisible && !showConsole,
-                            enter = fadeIn(),
-                            exit = fadeOut(),
-                            modifier = Modifier.align(Alignment.TopEnd)
-                        ) {
-                            Box {
-                                IconButton(onClick = { showMenu = true }) {
-                                    Icon(
-                                        imageVector = Icons.Default.MoreVert,
-                                        contentDescription = "Settings",
-                                        tint = MaterialTheme.colorScheme.onSurface
-                                    )
-                                }
-                                DropdownMenu(
-                                    expanded = showMenu,
-                                    onDismissRequest = { showMenu = false }
-                                ) {
-                                    DropdownMenuItem(
-                                        text = { Text(if (skipSponsorsEnabled) "Skip Sponsors ✓" else "Skip Sponsors") },
-                                        onClick = { 
-                                            skipSponsorsEnabled = !skipSponsorsEnabled
-                                            prefs.edit().putBoolean("skip_sponsors_enabled", skipSponsorsEnabled).apply()
-                                            mainSession?.loadUri("javascript:window._jutoob_sb_enabled = $skipSponsorsEnabled;")
-                                            showMenu = false
+                        // Top Bar Actions (Settings on Right)
+                        if (!isLandscape && isHeaderVisible && !showConsole) {
+                            // Settings Button on the Right
+                            Box(modifier = Modifier.align(Alignment.TopEnd)) {
+                                if (isHomePage) {
+                                    Box {
+                                        IconButton(onClick = { showMenu = true }) {
+                                            Icon(
+                                                imageVector = Icons.Default.MoreVert,
+                                                contentDescription = "Settings",
+                                                tint = MaterialTheme.colorScheme.onSurface
+                                            )
                                         }
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("About") },
-                                        onClick = { 
-                                            showMenu = false
-                                            showAboutDialog = true
+                                        DropdownMenu(
+                                            expanded = showMenu,
+                                            onDismissRequest = { showMenu = false }
+                                        ) {
+                                            DropdownMenuItem(
+                                                text = { Text(if (skipSponsorsEnabled) "Skip Sponsors ✓" else "Skip Sponsors") },
+                                                onClick = { 
+                                                    skipSponsorsEnabled = !skipSponsorsEnabled
+                                                    prefs.edit().putBoolean("skip_sponsors_enabled", skipSponsorsEnabled).apply()
+                                                    mainSession?.loadUri("javascript:window._jutoob_sb_enabled = $skipSponsorsEnabled;")
+                                                    showMenu = false
+                                                }
+                                            )
+                                            DropdownMenuItem(
+                                                text = { Text("About") },
+                                                onClick = { 
+                                                    showMenu = false
+                                                    showAboutDialog = true
+                                                }
+                                            )
+                                            DropdownMenuItem(
+                                                text = { Text("Enjoying jutoob?") },
+                                                onClick = { 
+                                                    showMenu = false
+                                                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://buymeacoffee.com/jutoob"))
+                                                    context.startActivity(intent)
+                                                }
+                                            )
                                         }
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("Enjoying jutoob?") },
-                                        onClick = { 
-                                            showMenu = false
-                                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://buymeacoffee.com/jutoob"))
-                                            context.startActivity(intent)
-                                        }
-                                    )
+                                    }
                                 }
                             }
                         }
+                        
                         LaunchedEffect(isLandscape) {
                             val window = (view.context as? ComponentActivity)?.window ?: return@LaunchedEffect
                             val controller = WindowCompat.getInsetsController(window, view)
@@ -470,6 +487,15 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 
+                if (showDownloadDialog && currentVideoId != null) {
+                    DownloadDialog(
+                        videoId = currentVideoId!!,
+                        videoTitle = currentVideoTitle,
+                        token = generateDownloadToken(),
+                        onDismiss = { showDownloadDialog = false }
+                    )
+                }
+                
                 if (showAboutDialog) {
                     AlertDialog(
                         onDismissRequest = { showAboutDialog = false },
@@ -510,16 +536,31 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun generateDownloadToken(): String {
+        val secret = "overflowy2mate"
+        val header = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}"
+        val now = System.currentTimeMillis() / 1000
+        val payload = "{\"authorized\":true,\"timestamp\":${System.currentTimeMillis()},\"iat\":$now,\"exp\":${now + 180}}"
+        
+        val base64Header = Base64.encodeToString(header.toByteArray(), Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
+        val base64Payload = Base64.encodeToString(payload.toByteArray(), Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
+        
+        val data = "$base64Header.$base64Payload"
+        val mac = Mac.getInstance("HmacSHA256")
+        mac.init(SecretKeySpec(secret.toByteArray(), "HmacSHA256"))
+        val signature = mac.doFinal(data.toByteArray())
+        val base64Signature = Base64.encodeToString(signature, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
+        
+        return "$data.$base64Signature"
+    }
+
     override fun onPause() {
         super.onPause()
-        // We keep session active for background audio support
-        // mainSession?.setActive(false)
     }
 
     override fun onResume() {
         super.onResume()
         mainSession?.setActive(true)
-        // Ensure active state after surface is likely ready
         Handler(Looper.getMainLooper()).postDelayed({
             mainSession?.setActive(true)
         }, 300)
@@ -527,7 +568,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        // Stops background player if user destroy UI
         if (isFinishing) {
             stopPlaybackAndShutdown()
         }
@@ -555,7 +595,7 @@ class MainActivity : ComponentActivity() {
             val focusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
                 .setAudioAttributes(audioAttributes)
                 .setAcceptsDelayedFocusGain(true)
-                .setOnAudioFocusChangeListener { /* Handle change if needed */ }
+                .setOnAudioFocusChangeListener { }
                 .build()
             audioManager.requestAudioFocus(focusRequest)
         } else {
@@ -577,7 +617,7 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             while (true) {
                 delay(1000)
-                if (isYoutubeLoaded && !isInstalling && isNetworkConnected) {
+                if (isYoutubeLoaded && !isInstalling && isNetworkConnected && !isLiveStream) {
                     val currentTime = System.currentTimeMillis()
                     if (currentTime - lastHeartbeatTime > reloadTimeout) {
                         Log.e("JuToob", "Heartbeat lost! Re-loading session.")
@@ -594,19 +634,36 @@ class MainActivity : ComponentActivity() {
     private fun setupMainSessionDelegates(session: GeckoSession) {
         session.contentDelegate = object : GeckoSession.ContentDelegate {
             override fun onTitleChange(session: GeckoSession, title: String?) {
+                if (title == "JUTOOB_DO_DL_V3") {
+                    Handler(Looper.getMainLooper()).post { showDownloadDialog = true }
+                    return
+                }
+
+                if (title == "JUTOOB_LIVE_TRUE") {
+                    isLiveStream = true
+                    return
+                }
+
+                if (title == "JUTOOB_LIVE_FALSE") {
+                    isLiveStream = false
+                    return
+                }
+                
                 if (title?.startsWith("JUTOOB") == true) {
                     lastHeartbeatTime = System.currentTimeMillis()
                     if (isFirstLoad) {
                         isFirstLoad = false
-                        reloadTimeout = 30000L // Still allow buffer for initial settling
+                        reloadTimeout = 30000L
                         Handler(Looper.getMainLooper()).postDelayed({
                             reloadTimeout = 5000L
                         }, 5000)
                     }
-                    //Log.e("JuToob", "Heartbeat: $title $reloadTimeout")
+                } else if (title != null && title != "YouTube") {
+                    currentVideoTitle = title.replace(" - YouTube", "").trim()
                 }
             }
         }
+        
         session.scrollDelegate = object : GeckoSession.ScrollDelegate {
             override fun onScrollChanged(session: GeckoSession, scrollX: Int, scrollY: Int) {
                 if (scrollY > lastScrollY + 10 && scrollY > 100) {
@@ -627,16 +684,21 @@ class MainActivity : ComponentActivity() {
                 return GeckoResult.fromValue(AllowOrDeny.ALLOW)
             }
             override fun onLocationChange(s: GeckoSession, url: String?, p: List<GeckoSession.PermissionDelegate.ContentPermission>, g: Boolean) {
-                 isHomePage = url?.contains("/watch") != true
+                 isHomePage = url?.contains("/watch") != true && url?.contains("/shorts/") != true && url?.contains("/live/") != true
+                 isLiveStream = url?.contains("/live/") == true
                  
+                 currentVideoId = if (!isHomePage) {
+                     val uri = Uri.parse(url)
+                     uri.getQueryParameter("v") ?: url?.substringAfter("/shorts/")?.substringAfter("/live/")?.substringBefore("?")?.takeIf { it.length == 11 }
+                 } else {
+                     null
+                 }
+
                  when {
                     url?.contains("accounts.google.com") == true -> {
-                        Log.e("JuToob", "User is logging in. Heartbeat expected to stop.")
-                        reloadTimeout = 600000L // 10 minutes
+                        reloadTimeout = 600000L
                     }
                     url?.contains("m.youtube.com") == true -> {
-                        //Log.e("JuToob", "User is on YouTube. Heartbeat should resume.")
-                        // If we haven't successfully seen a heartbeat yet, use a longer timeout
                         reloadTimeout = if (isFirstLoad) 30000L else 5000L
                     }
                  }
@@ -647,10 +709,44 @@ class MainActivity : ComponentActivity() {
                         "try { Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36', configurable: false }); } catch(e) {} " +
                         "var bannerStyle = document.getElementById('jutoob-banner-style'); if (!bannerStyle) { bannerStyle = document.createElement('style'); bannerStyle.id = 'jutoob-banner-style'; document.head.appendChild(bannerStyle); } " +
                         "bannerStyle.innerHTML = ` ytm-app-banner, .open-in-app-banner, ytm-mealbar-promo-renderer, ytd-app-promo-renderer, ytd-smart-app-banner-renderer, ytd-banner-promo-renderer, tp-yt-paper-dialog { display: none !important; } .mobile-topbar-header, ytm-mobile-topbar-renderer { padding-right: $paddingValue !important; } `; " +
+                        "function checkLive() { var isLive = !!(document.querySelector('.ytp-live') || document.querySelector('.badge-style-type-live-now') || !!document.querySelector('[itemprop=\"isLiveBroadcast\"]')); var oldT = document.title; document.title = isLive ? 'JUTOOB_LIVE_TRUE' : 'JUTOOB_LIVE_FALSE'; setTimeout(function(){ document.title = oldT; }, 100); } " +
+                        "if (window._jutoob_live_interval) clearInterval(window._jutoob_live_interval); window._jutoob_live_interval = setInterval(checkLive, 5000); checkLive(); " +
                         "})()")
 
-                 if (url?.contains("/watch") == true) {
+                 if (url?.contains("/watch") == true || url?.contains("/shorts/") == true || url?.contains("/live/") == true) {
                      s.loadUri("javascript:$sponsorBlockScript")
+                     
+                     s.loadUri("javascript:(function() { " +
+                        "function injectDownloadBtn() { " +
+                        "  if (!location.href.includes('/watch') && !location.href.includes('/shorts/') && !location.href.includes('/live/')) { " +
+                        "    var existing = document.getElementById('jutoob-download-btn'); " +
+                        "    if (existing) existing.remove(); " +
+                        "    return; " +
+                        "  } " +
+                        "  var topBar = document.querySelector('ytm-mobile-topbar-renderer .header-bar') || document.querySelector('.mobile-topbar-header') || document.querySelector('mobile-topbar-header'); " +
+                        "  if (!topBar || document.getElementById('jutoob-download-btn')) return; " +
+                        "  var btn = document.createElement('div'); " +
+                        "  btn.id = 'jutoob-download-btn'; " +
+                        "  btn.style.cssText = 'margin-left:8px; margin-right:8px; display:inline-flex; align-items:center; cursor:pointer; position:relative; z-index:99; width:40px; height:40px; justify-content:center; pointer-events:auto !important;'; " +
+                        "  btn.innerHTML = '<svg viewBox=\"0 0 24 24\" style=\"width:24px; height:24px; fill:white; pointer-events:none;\"><path d=\"M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z\"/></svg>'; " +
+                        "  " +
+                        "  btn.onclick = function(e) { " +
+                        "    e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); " +
+                        "    var oldTitle = document.title; " +
+                        "    document.title = 'JUTOOB_DO_DL_V3'; " +
+                        "    setTimeout(function() { document.title = oldTitle; }, 100); " +
+                        "    return false; " +
+                        "  }; " +
+                        "  " +
+                        "  var logo = topBar.querySelector('.header-logo') || topBar.querySelector('a[href=\"/\"]') || topBar.querySelector('.header-logo-container') || topBar.firstElementChild; " +
+                        "  if (logo) logo.insertAdjacentElement('afterend', btn); " +
+                        "} " +
+                        "injectDownloadBtn(); " +
+                        "if (!window._jutoob_observer) { " +
+                        "  window._jutoob_observer = new MutationObserver(injectDownloadBtn); " +
+                        "  window._jutoob_observer.observe(document.body, { childList: true, subtree: true }); " +
+                        "} " +
+                        "})()")
                  }
             }
         }
@@ -677,62 +773,39 @@ class MainActivity : ComponentActivity() {
     private fun checkExtensions() {
         val prefs = getPreferences(Context.MODE_PRIVATE)
         val isInstalled = prefs.getBoolean("extensions_installed_v6", false)
-
         if (isInstalled) {
             logAndConsole("Extensions already installed...")
             return
         }
-
         installExtensions()
     }
 
     private fun installExtensions() {
-        Log.e("JuToob", "STARTING FRESH INSTALL")
-        
         lifecycleScope.launch {
             delay(300)
             showConsole = true
             isYoutubeLoaded = true
             
             val controller = geckoRuntime?.webExtensionController ?: run {
-                Log.e("JuToob", "WebExtensionController IS NULL")
                 isInstalling = false
                 showConsole = false
                 showBlackOverlay = false
                 return@launch
             }
 
-            val xpiExtensions = listOf(
-                "background_playback.xpi",
-                "nonstop_playing.xpi",
-                "block_shorts.xpi",
-                "ultimate_adblocker.xpi"
-            )
-            
-            val builtInExtensions = listOf(
-                "youtube_cleaner_extension/" to "Cleaner",
-                "youtube_autolike/" to "Autolike"
-            )
+            val xpiExtensions = listOf("background_playback.xpi", "nonstop_playing.xpi", "block_shorts.xpi", "ultimate_adblocker.xpi")
+            val builtInExtensions = listOf("youtube_cleaner_extension/" to "Cleaner", "youtube_autolike/" to "Autolike", "members_only_hider/" to "Members", "download_menu/" to "Download")
 
             logAndConsole("Installing browser extensions...")
 
-            // 1. Kick off parallel actual installations that log their OWN success/fail
             val xpiJobs = xpiExtensions.map { fileName ->
                 async {
                     val extension = suspendCoroutine<WebExtension?> { cont ->
-                        controller.install("resource://android/assets/$fileName").accept(
-                            { ext -> cont.resume(ext) },
-                            { throwable -> 
-                                Log.e("JuToob", "Error installing $fileName", throwable)
-                                cont.resume(null) 
-                            }
-                        )
+                        controller.install("resource://android/assets/$fileName").accept({ ext -> cont.resume(ext) }, { cont.resume(null) })
                     }
                     if (extension != null) {
                         controller.enable(extension, WebExtensionController.EnableSource.APP)
                         logAndConsole("[SUCCESS] $fileName ready.")
-                    } else {
-                        logAndConsole("[ERROR] $fileName failed.", isError = true)
                     }
                     extension != null
                 }
@@ -741,39 +814,18 @@ class MainActivity : ComponentActivity() {
             val builtInJobs = builtInExtensions.map { (path, name) ->
                 async {
                     val extension = suspendCoroutine<WebExtension?> { cont ->
-                        controller.installBuiltIn("resource://android/assets/$path").accept(
-                            { ext -> cont.resume(ext) },
-                            { cont.resume(null) }
-                        )
+                        controller.installBuiltIn("resource://android/assets/$path").accept({ ext -> cont.resume(ext) }, { cont.resume(null) })
                     }
                     if (extension != null) {
                         controller.enable(extension, WebExtensionController.EnableSource.APP)
                         delay(Random.nextLong(1000, 2000))
                         logAndConsole("[SUCCESS] $name installed.")
-                    } else {
-                        logAndConsole("[ERROR] $name failed.", isError = true)
                     }
                     extension != null
                 }
             }
 
-            val entertainerJob = launch {
-                for ((_, name) in builtInExtensions) {
-                    logAndConsole("install $name")
-                    delay(Random.nextLong(400, 800))
-                }
-                for (fileName in xpiExtensions) {
-                    logAndConsole("install $fileName")
-                    delay(Random.nextLong(1000, 2000))
-                }
-            }
-
-            // 3. Wait for all background tasks to finish
             (xpiJobs + builtInJobs).awaitAll()
-            
-            // Ensure entertainer finishes its sequence before closing up
-            entertainerJob.join()
-
             logAndConsole("[SUCCESS] All browser extensions installed.")
 
             mainSession?.stop()
@@ -784,7 +836,6 @@ class MainActivity : ComponentActivity() {
             delay(2000)
             showBlackOverlay = false
             getPreferences(Context.MODE_PRIVATE).edit().putBoolean("extensions_installed_v6", true).apply()
-            Log.e("JuToob", "COMPLETED.")
         }
     }
     
@@ -794,7 +845,6 @@ class MainActivity : ComponentActivity() {
         stopService(Intent(this, MediaPlaybackService::class.java))
         finishAffinity()
         android.os.Process.killProcess(android.os.Process.myPid())
-        System.exit(0)
     }
 }
 
@@ -809,23 +859,13 @@ fun YouTubeGeckoPlayer(
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(session, lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            when (event) {
-                Lifecycle.Event.ON_RESUME -> {
-                    session.setActive(true)
-                    runtime.webExtensionController.setTabActive(session, true)
-                }
-                Lifecycle.Event.ON_PAUSE -> {
-                    // We keep session active for background audio support
-                    // session.setActive(false)
-                }
-                else -> {}
+            if (event == Lifecycle.Event.ON_RESUME) {
+                session.setActive(true)
+                runtime.webExtensionController.setTabActive(session, true)
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
-        
-        onDispose { 
-            lifecycleOwner.lifecycle.removeObserver(observer)
-        }
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     BackHandler { if (canGoBackState) session.goBack() }
@@ -836,21 +876,102 @@ fun YouTubeGeckoPlayer(
             GeckoView(ctx).apply {
                 setSession(session)
                 setBackgroundColor(Color.BLACK)
-                
-                // Ensure session is active when window focus is regained (unlock/resume)
                 viewTreeObserver.addOnWindowFocusChangeListener { hasFocus ->
-                    if (hasFocus && !isInstalling) {
-                        session.setActive(true)
-                    }
+                    if (hasFocus && !isInstalling) session.setActive(true)
                 }
             }
         },
         update = { view ->
             view.setBackgroundColor(Color.BLACK)
-            // Nudge session activity if view is visible but Gecko might be stalled
-            if (view.isShown && !isInstalling) {
-                session.setActive(true)
-            }
+            if (view.isShown && !isInstalling) session.setActive(true)
         }
     )
+}
+
+@Composable
+fun DownloadDialog(videoId: String, videoTitle: String, token: String, onDismiss: () -> Unit) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth(0.85f)
+                .fillMaxHeight(0.70f)
+                .clip(RoundedCornerShape(16.dp))
+                .background(androidx.compose.ui.graphics.Color(0xFF374151))
+                .border(1.dp, androidx.compose.ui.graphics.Color(0xFF333333), RoundedCornerShape(16.dp))
+        ) {
+            Column {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(1.dp)
+                ) {
+                    TextButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.align(Alignment.CenterEnd)
+                    ) {
+                        Text("X", color = MaterialTheme.colorScheme.primary)
+                    }
+                }
+                
+                AndroidView(
+                    modifier = Modifier.fillMaxSize(),
+                    factory = { context ->
+                        android.webkit.WebView(context).apply {
+                            settings.javaScriptEnabled = true
+                            settings.domStorageEnabled = true
+                            settings.setSupportZoom(false)
+                            settings.builtInZoomControls = false
+                            settings.useWideViewPort = true
+                            settings.loadWithOverviewMode = true
+                            
+                            webViewClient = object : WebViewClient() {
+                                override fun onPageFinished(view: WebView?, url: String?) {
+                                    super.onPageFinished(view, url)
+                                    view?.loadUrl("javascript:(function() { " +
+                                        "document.body.style.margin='0'; " +
+                                        "document.body.style.padding='0'; " +
+                                        "var container = document.querySelector('.container') || document.body; " +
+                                        "container.style.display = 'block'; " +
+                                        "container.style.paddingTop = '0'; " +
+                                        "var si = setInterval(function() { window.scrollTo(0, 0); document.documentElement.scrollTop = 0; }, 100); " +
+                                        "setTimeout(function() { clearInterval(si); }, 2000); " +
+                                        "})()")
+                                }
+                            }
+                            
+                            setDownloadListener { url, userAgent, contentDisposition, mimetype, contentLength ->
+                                val ext = if (mimetype.contains("audio")) "mp3" else "mp4"
+                                val safeTitle = videoTitle.replace("[^a-zA-Z0-9.-]".toRegex(), " ")
+                                val fileName = "${safeTitle}.$ext"
+
+                                val request = DownloadManager.Request(Uri.parse(url))
+                                    .setTitle(fileName)
+                                    .setDescription("jutoob download")
+                                    .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                                    .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, "jutoob/$fileName")
+                                    .addRequestHeader("User-Agent", userAgent)
+
+                                val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+                                try {
+                                    dm.enqueue(request)
+                                    Toast.makeText(context, "Downloading: $fileName", Toast.LENGTH_SHORT).show()
+                                } catch (e: Exception) {
+                                    Toast.makeText(context, "Download failed: ${e.message}", Toast.LENGTH_LONG).show()
+                                }
+                                
+                                onDismiss()
+                            }
+                            
+                            val youtubeUrl = "https://youtube.com/watch?v=$videoId"
+                            val iframeUrl = "https://meowing.ssstik.art/download?url=${Uri.encode(youtubeUrl)}&token=$token"
+                            loadUrl(iframeUrl)
+                        }
+                    }
+                )
+            }
+        }
+    }
 }
