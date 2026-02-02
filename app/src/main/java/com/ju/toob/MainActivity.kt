@@ -896,8 +896,8 @@ fun DownloadDialog(videoId: String, videoTitle: String, token: String, onDismiss
     ) {
         Box(
             modifier = Modifier
-                .fillMaxWidth(0.85f)
-                .fillMaxHeight(0.70f)
+                .fillMaxWidth(0.80f)
+                .fillMaxHeight(0.65f)
                 .clip(RoundedCornerShape(16.dp))
                 .background(androidx.compose.ui.graphics.Color(0xFF374151))
                 .border(1.dp, androidx.compose.ui.graphics.Color(0xFF333333), RoundedCornerShape(16.dp))
