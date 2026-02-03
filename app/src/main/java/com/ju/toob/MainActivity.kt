@@ -944,7 +944,7 @@ fun DownloadDialog(videoId: String, videoTitle: String, token: String, onDismiss
                             
                             setDownloadListener { url, userAgent, contentDisposition, mimetype, contentLength ->
                                 val ext = if (mimetype.contains("audio")) "mp3" else "mp4"
-                                val safeTitle = videoTitle.replace("[^a-zA-Z0-9.-]".toRegex(), " ")
+                                val safeTitle = videoTitle.replace("[^a-zA-Z0-9.-]".toRegex(), " ").replace("\\s+".toRegex(), " ").trim().trim('.').ifEmpty { "untitled" }
                                 val fileName = "${safeTitle}.$ext"
 
                                 val request = DownloadManager.Request(Uri.parse(url))
