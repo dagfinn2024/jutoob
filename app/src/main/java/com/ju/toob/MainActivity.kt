@@ -29,6 +29,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -138,6 +139,9 @@ class MainActivity : ComponentActivity() {
     private var currentVideoTitle by mutableStateOf<String>("jutoob_video")
     private var isLiveStream by mutableStateOf(false)
 
+    private var showConsentDialog by mutableStateOf(false)
+    private var showWhimsicalExitDialog by mutableStateOf(false)
+
     private val sponsorBlockScript = """
         (function() {
           if (window._jutoob_sb_injected) return;
@@ -208,10 +212,18 @@ class MainActivity : ComponentActivity() {
         
         val prefs = getPreferences(Context.MODE_PRIVATE)
         val hasFinishedInstallation = prefs.getBoolean("extensions_installed_v6", false)
+        val hasConsented = prefs.getBoolean("user_consented", false)
+        
         skipSponsorsEnabled = prefs.getBoolean("skip_sponsors_enabled", true)
-        isInstalling = !hasFinishedInstallation
-        if (isInstalling) {
-            showBlackOverlay = true
+        
+        showConsentDialog = !hasConsented
+        
+        // Only start installation process if we have consent
+        if (hasConsented) {
+            isInstalling = !hasFinishedInstallation
+            if (isInstalling) {
+                showBlackOverlay = true
+            }
         }
 
         splashScreen.setKeepOnScreenCondition {
@@ -275,7 +287,10 @@ class MainActivity : ComponentActivity() {
             }
         })
         
-        checkExtensions()
+        if (hasConsented) {
+            checkExtensions()
+        }
+        
         startHeartbeatMonitor()
         requestAudioFocus()
         startPlaybackService()
@@ -306,8 +321,7 @@ class MainActivity : ComponentActivity() {
                         )
 
                         // ONLY include installation UI components if the app hasn't been successfully set up yet.
-                        val needsInstallationUI = remember { !hasFinishedInstallation }
-                        if (needsInstallationUI) {
+                        if (!hasFinishedInstallation) {
                             AnimatedVisibility(
                                 visible = showBlackOverlay,
                                 enter = fadeIn(),
@@ -414,18 +428,23 @@ class MainActivity : ComponentActivity() {
                                                 }
                                             )
                                             DropdownMenuItem(
-                                                text = { Text("About") },
-                                                onClick = { 
-                                                    showMenu = false
-                                                    showAboutDialog = true
-                                                }
-                                            )
-                                            DropdownMenuItem(
                                                 text = { Text("Enjoying jutoob?") },
                                                 onClick = { 
                                                     showMenu = false
-                                                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://buymeacoffee.com/jutoob"))
-                                                    context.startActivity(intent)
+                                                    try {
+                                                        val customTabsIntent = CustomTabsIntent.Builder().build()
+                                                        customTabsIntent.launchUrl(context, Uri.parse("https://buymeacoffee.com/jutoob"))
+                                                    } catch (e: Exception) {
+                                                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://buymeacoffee.com/jutoob"))
+                                                        context.startActivity(intent)
+                                                    }
+                                                }
+                                            )
+                                            DropdownMenuItem(
+                                                text = { Text("About") },
+                                                onClick = {
+                                                    showMenu = false
+                                                    showAboutDialog = true
                                                 }
                                             )
                                         }
@@ -485,6 +504,46 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                     }
+                }
+
+                if (showConsentDialog) {
+                    AlertDialog(
+                        onDismissRequest = { /* Require interaction */ },
+                        title = { Text("Ads… Who Needs ’Em?") },
+                        text = { Text("By continuing, you agree to install a third-party ad-blocker that may prevent ads from appearing in YouTube videos. You acknowledge that jutoob is not responsible for any issues arising from this, and you indemnify us from any claims. Proceed only if you consent!") },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                prefs.edit().putBoolean("user_consented", true).apply()
+                                showConsentDialog = false
+                                checkExtensions()
+                            }) {
+                                Text("✅ Yes, block the ads!")
+                            }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = {
+                                showConsentDialog = false
+                                showWhimsicalExitDialog = true
+                            }) {
+                                Text("❌ Nope")
+                            }
+                        },
+                        properties = DialogProperties(dismissOnBackPress = false, dismissOnClickOutside = false)
+                    )
+                }
+
+                if (showWhimsicalExitDialog) {
+                    AlertDialog(
+                        onDismissRequest = { finish() },
+                        title = { Text("No worries!") },
+                        text = { Text("YouTube ads will keep you company.") },
+                        confirmButton = {
+                            TextButton(onClick = { finish() }) {
+                                Text("Exit")
+                            }
+                        },
+                        properties = DialogProperties(dismissOnBackPress = false, dismissOnClickOutside = false)
+                    )
                 }
                 
                 if (showDownloadDialog && currentVideoId != null) {
@@ -561,9 +620,6 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         mainSession?.setActive(true)
-        Handler(Looper.getMainLooper()).postDelayed({
-            mainSession?.setActive(true)
-        }, 300)
     }
 
     override fun onDestroy() {
@@ -777,6 +833,10 @@ class MainActivity : ComponentActivity() {
             logAndConsole("Extensions already installed...")
             return
         }
+        
+        // Trigger installation UI
+        isInstalling = true
+        showBlackOverlay = true
         installExtensions()
     }
 

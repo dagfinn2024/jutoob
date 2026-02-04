@@ -102,6 +102,7 @@ dependencies {
     
     implementation(libs.geckoview)
     implementation(libs.androidx.core.splashscreen)
+    implementation(libs.androidx.browser)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
