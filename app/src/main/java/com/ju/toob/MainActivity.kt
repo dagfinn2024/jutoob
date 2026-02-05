@@ -111,6 +111,7 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 import kotlin.random.Random
 import android.util.Base64
+import org.json.JSONObject
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
@@ -272,7 +273,9 @@ class MainActivity : ComponentActivity() {
         mainSession?.apply {
             open(geckoRuntime!!)
             if (isNetworkConnected) {
-                loadUri("https://m.youtube.com/?jutoob_startup=1")
+                if (hasFinishedInstallation || !hasConsented) {
+                    loadUri("https://m.youtube.com/?jutoob_startup=1")
+                }
             }
         }
 
@@ -325,7 +328,7 @@ class MainActivity : ComponentActivity() {
                             AnimatedVisibility(
                                 visible = showBlackOverlay,
                                 enter = fadeIn(),
-                                exit = fadeOut(animationSpec = tween(1000))
+                                exit = fadeOut(animationSpec = tween(2000))
                             ) {
                                 Box(modifier = Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Color.Black))
                             }
@@ -362,7 +365,7 @@ class MainActivity : ComponentActivity() {
                                         ) {
                                             Column {
                                                 Text(
-                                                    text = "jutoob@android:~/extensions$",
+                                                    text = "jutoob@android:~/",
                                                     color = androidx.compose.ui.graphics.Color(0xFF00FF00).copy(alpha = 0.7f),
                                                     fontSize = 10.sp,
                                                     fontFamily = FontFamily.Monospace,
@@ -695,6 +698,13 @@ class MainActivity : ComponentActivity() {
                     return
                 }
 
+                if (title == "JUTOOB_ERR_LONG") {
+                    Handler(Looper.getMainLooper()).post { 
+                        Toast.makeText(this@MainActivity, "Videos longer than 90 minutes cannot be downloaded", Toast.LENGTH_LONG).show() 
+                    }
+                    return
+                }
+
                 if (title == "JUTOOB_LIVE_TRUE") {
                     isLiveStream = true
                     return
@@ -711,8 +721,8 @@ class MainActivity : ComponentActivity() {
                         isFirstLoad = false
                         reloadTimeout = 30000L
                         Handler(Looper.getMainLooper()).postDelayed({
-                            reloadTimeout = 5000L
-                        }, 5000)
+                            reloadTimeout = 9000L
+                        }, 9000)
                     }
                 } else if (title != null && title != "YouTube") {
                     currentVideoTitle = title.replace(" - YouTube", "").trim()
@@ -755,7 +765,7 @@ class MainActivity : ComponentActivity() {
                         reloadTimeout = 600000L
                     }
                     url?.contains("m.youtube.com") == true -> {
-                        reloadTimeout = if (isFirstLoad) 30000L else 5000L
+                        reloadTimeout = if (isFirstLoad) 30000L else 9000L
                     }
                  }
 
@@ -788,6 +798,13 @@ class MainActivity : ComponentActivity() {
                         "  " +
                         "  btn.onclick = function(e) { " +
                         "    e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); " +
+                        "    var v = document.querySelector('video'); " +
+                        "    if (v && v.duration > 5399) { " +
+                        "      var oldT = document.title; " +
+                        "      document.title = 'JUTOOB_ERR_LONG'; " +
+                        "      setTimeout(function() { document.title = oldT; }, 100); " +
+                        "      return false; " +
+                        "    } " +
                         "    var oldTitle = document.title; " +
                         "    document.title = 'JUTOOB_DO_DL_V3'; " +
                         "    setTimeout(function() { document.title = oldTitle; }, 100); " +
@@ -854,7 +871,7 @@ class MainActivity : ComponentActivity() {
             }
 
             val xpiExtensions = listOf("background_playback.xpi", "nonstop_playing.xpi", "block_shorts.xpi", "ultimate_adblocker.xpi")
-            val builtInExtensions = listOf("youtube_cleaner_extension/" to "Cleaner", "youtube_autolike/" to "Autolike", "members_only_hider/" to "Members", "download_menu/" to "Download")
+            val builtInExtensions = listOf("youtube_cleaner_extension/" to "Interface Cleaner", "youtube_autolike/" to "Autolike Subscribed", "members_only_hider/" to "Remove Members Only")
 
             logAndConsole("Installing browser extensions...")
 
@@ -865,7 +882,7 @@ class MainActivity : ComponentActivity() {
                     }
                     if (extension != null) {
                         controller.enable(extension, WebExtensionController.EnableSource.APP)
-                        logAndConsole("[SUCCESS] $fileName ready.")
+                        logAndConsole("[SUCCESS] $fileName installed.")
                     }
                     extension != null
                 }
@@ -878,7 +895,7 @@ class MainActivity : ComponentActivity() {
                     }
                     if (extension != null) {
                         controller.enable(extension, WebExtensionController.EnableSource.APP)
-                        delay(Random.nextLong(1000, 2000))
+                        delay(Random.nextLong(250, 750))
                         logAndConsole("[SUCCESS] $name installed.")
                     }
                     extension != null
@@ -886,16 +903,26 @@ class MainActivity : ComponentActivity() {
             }
 
             (xpiJobs + builtInJobs).awaitAll()
+            delay(1500)
             logAndConsole("[SUCCESS] All browser extensions installed.")
 
+            // Slight delay to allow GeckoView to finalize extension registration globally
+            delay(1500)
+            logAndConsole("Finalizing setup and refreshing session...")
+
             mainSession?.stop()
-            mainSession?.loadUri("https://m.youtube.com/results?search_query=trending")
+            delay(1500)
+            // Loading the homepage ensures a fresh start with all extensions active
+            mainSession?.loadUri("https://m.youtube.com/results?search_query=trending&jutoob_startup=1")
+            
             isInstalling = false
             delay(2000)
             showConsole = false
             delay(2000)
             showBlackOverlay = false
             getPreferences(Context.MODE_PRIVATE).edit().putBoolean("extensions_installed_v6", true).apply()
+            
+            logAndConsole("Setup complete!")
         }
     }
     

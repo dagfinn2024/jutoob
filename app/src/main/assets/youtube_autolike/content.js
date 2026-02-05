@@ -51,13 +51,19 @@
     const subButton = findElement(SUB_SELECTORS);
     const likeButton = findElement(LIKE_SELECTORS);
 
-    if (!subButton) {return;}
-    if (!likeButton) {return;}
+    if (!subButton) {
+      return;
+    }
+    if (!likeButton) {
+      return;
+    }
 
     const subscribed = isSubscribed(subButton);
     const liked = isLiked(likeButton);
 
-    if (subscribed && !liked) {likeButton.click();}
+    if (subscribed && !liked) {
+      likeButton.click();
+    }
   }
 
   // Run more frequently at the start of a page load
@@ -84,29 +90,31 @@
       );
       const hasHomeFeed = videoItems.length >= 2;
 
-      if (!isLoggedIn || !hasHomeFeed) {
-        if (!hasHomeFeed) {
-          window.location.replace(
-            "https://m.youtube.com/results?search_query=trending"
-          );
+      if (!window.location.href.includes("trending")) {
+        if (!isLoggedIn || !hasHomeFeed) {
+          if (!hasHomeFeed) {
+            window.location.replace(
+              "https://m.youtube.com/results?search_query=trending"
+            );
+          } else {
+            const cleanUrl = location.href
+              .replace(/[?&]jutoob_startup=1/, "")
+              .replace(/[?&]$/, "");
+            window.history.replaceState({}, document.title, cleanUrl);
+          }
         } else {
           const cleanUrl = location.href
             .replace(/[?&]jutoob_startup=1/, "")
             .replace(/[?&]$/, "");
           window.history.replaceState({}, document.title, cleanUrl);
         }
-      } else {
-        const cleanUrl = location.href
-          .replace(/[?&]jutoob_startup=1/, "")
-          .replace(/[?&]$/, "");
-        window.history.replaceState({}, document.title, cleanUrl);
       }
     };
 
     if (document.readyState === "complete") {
-      setTimeout(checkLogic, 800);
+      setTimeout(checkLogic, 300);
     } else {
-      window.addEventListener("load", () => setTimeout(checkLogic, 800));
+      window.addEventListener("load", () => setTimeout(checkLogic, 300));
     }
   }
 

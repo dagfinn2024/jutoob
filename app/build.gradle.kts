@@ -9,10 +9,10 @@ android {
 
     defaultConfig {
         applicationId = "com.ju.toob"
-        minSdk = 29
+        minSdk = 28
         targetSdk = 35
-        versionCode = 28
-        versionName = "2.8"
+        versionCode = 30
+        versionName = "3.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
