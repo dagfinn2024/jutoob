@@ -78,36 +78,41 @@
     setTimeout(checkAndLike, 192000);
   });
 
-  // Check for startup redirect logic
+  // Check for startup redirect logic — retry to give YouTube time to render feed
   if (location.href.includes("jutoob_startup=1")) {
-    const checkLogic = () => {
-      const isLoggedIn = /(^|;)\s*(SID|HSID|SSID|APISID|SAPISID)=/.test(
-        document.cookie
-      );
+    let attempts = 0;
+    const maxAttempts = 10;
+    const retryInterval = 500;
 
+    const cleanStartupParam = () => {
+      const cleanUrl = location.href
+        .replace(/[?&]jutoob_startup=1/, "")
+        .replace(/[?&]$/, "");
+      window.history.replaceState({}, document.title, cleanUrl);
+    };
+
+    const checkLogic = () => {
       const videoItems = document.querySelectorAll(
-        "ytm-video-with-context-renderer, ytm-rich-item-renderer, ytm-compact-video-renderer"
+        "ytm-video-with-context-renderer, ytm-rich-item-renderer, ytm-compact-video-renderer, ytm-media-item"
       );
       const hasHomeFeed = videoItems.length >= 2;
 
+      if (hasHomeFeed) {
+        cleanStartupParam();
+        return;
+      }
+
+      attempts++;
+      if (attempts < maxAttempts) {
+        setTimeout(checkLogic, retryInterval);
+        return;
+      }
+
+      // After all retries, no videos found — redirect to trending
       if (!window.location.href.includes("trending")) {
-        if (!isLoggedIn || !hasHomeFeed) {
-          if (!hasHomeFeed) {
-            window.location.replace(
-              "https://m.youtube.com/results?search_query=trending"
-            );
-          } else {
-            const cleanUrl = location.href
-              .replace(/[?&]jutoob_startup=1/, "")
-              .replace(/[?&]$/, "");
-            window.history.replaceState({}, document.title, cleanUrl);
-          }
-        } else {
-          const cleanUrl = location.href
-            .replace(/[?&]jutoob_startup=1/, "")
-            .replace(/[?&]$/, "");
-          window.history.replaceState({}, document.title, cleanUrl);
-        }
+        window.location.replace(
+          "https://m.youtube.com/results?search_query=trending"
+        );
       }
     };
 
