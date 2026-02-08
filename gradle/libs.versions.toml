@@ -11,6 +11,9 @@ composeBom = "2024.09.00"
 geckoview = "146.0.20251217121356"
 coreSplashscreen = "1.2.0"
 browser = "1.8.0"
+newpipeextractor = "17d6e5c5afb7e30506c5f809e96d68ef43f2f31c"
+okhttp = "4.12.0"
+json = "20231013"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -30,6 +33,9 @@ androidx-compose-material3 = { group = "androidx.compose.material3", name = "mat
 geckoview = { group = "org.mozilla.geckoview", name = "geckoview", version.ref = "geckoview" }
 androidx-core-splashscreen = { group = "androidx.core", name = "core-splashscreen", version.ref = "coreSplashscreen" }
 androidx-browser = { group = "androidx.browser", name = "browser", version.ref = "browser" }
+newpipeextractor = { module = "com.github.teamnewpipe:NewPipeExtractor", version.ref = "newpipeextractor" }
+okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
+json = { group = "org.json", name = "json", version.ref = "json" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

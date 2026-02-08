@@ -16,8 +16,8 @@
         }
       ],
       "attributes": [],
-      "versionCode": 26,
-      "versionName": "2.6",
+      "versionCode": 34,
+      "versionName": "3.4",
       "outputFile": "app-arm64-v8a-release.apk"
     }
   ],
@@ -38,5 +38,5 @@
       ]
     }
   ],
-  "minSdkVersionForDexing": 29
+  "minSdkVersionForDexing": 28
 }

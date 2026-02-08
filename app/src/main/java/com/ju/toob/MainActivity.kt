@@ -1,7 +1,6 @@
 package com.ju.toob
 
 import android.animation.ObjectAnimator
-import android.app.DownloadManager
 import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
@@ -14,16 +13,11 @@ import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.View
 import android.view.animation.AccelerateInterpolator
-import android.webkit.URLUtil
-import android.webkit.WebChromeClient
-import android.webkit.WebView
-import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -79,7 +73,6 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.animation.doOnEnd
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
@@ -106,18 +99,14 @@ import org.mozilla.geckoview.WebExtensionController
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import java.io.File
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 import kotlin.random.Random
-import android.util.Base64
-import org.json.JSONObject
-import javax.crypto.Mac
-import javax.crypto.spec.SecretKeySpec
 
 class MainActivity : ComponentActivity() {
     private var geckoRuntime: GeckoRuntime? = null
     private var mainSession: GeckoSession? = null
+    private var geckoView: GeckoView? = null
     private var canGoBack by mutableStateOf(false)
     private var isHomePage by mutableStateOf(true)
     private var isHeaderVisible by mutableStateOf(true)
@@ -134,11 +123,14 @@ class MainActivity : ComponentActivity() {
     private var reloadTimeout = 30000L
     private var isFirstLoad = true
     private var skipSponsorsEnabled by mutableStateOf(true)
+    private var blockShortsEnabled by mutableStateOf(true)
     
     private var showDownloadDialog by mutableStateOf(false)
     private var currentVideoId by mutableStateOf<String?>(null)
     private var currentVideoTitle by mutableStateOf<String>("jutoob_video")
     private var isLiveStream by mutableStateOf(false)
+    private var isReloading = false
+    private var currentPageUrl: String? = null
 
     private var showConsentDialog by mutableStateOf(false)
     private var showWhimsicalExitDialog by mutableStateOf(false)
@@ -204,21 +196,156 @@ class MainActivity : ComponentActivity() {
         })();
     """.trimIndent().replace("\n", " ")
 
+    private val blockShortsScript = """
+        (function() {
+          if (window._jutoob_bs_injected) return;
+          window._jutoob_bs_injected = true;
+          function removeSideBarIcon() {
+            const sideBarIconMini = document.querySelector("ytd-mini-guide-entry-renderer[aria-label=Shorts]");
+            if (sideBarIconMini) sideBarIconMini.remove();
+            const sideBarIconNormal = document.querySelector("ytd-guide-entry-renderer a[title=Shorts]");
+            if (sideBarIconNormal) sideBarIconNormal.remove();
+            const pivotShorts = document.querySelector('ytm-pivot-bar-item-renderer[content-type="shorts"]');
+            if (pivotShorts) pivotShorts.remove();
+          }
+          function removeShortsCaroussel() {
+            const videosCaroussel = document.querySelectorAll('ytd-rich-section-renderer ytd-rich-shelf-renderer, ytm-shorts-lockup-view-model, ytm-reel-shelf-renderer');
+            videosCaroussel.forEach(singleCaroussel => {
+              if (singleCaroussel.tagName.toLowerCase() === 'ytm-shorts-lockup-view-model' || singleCaroussel.tagName.toLowerCase() === 'ytm-reel-shelf-renderer') {
+                singleCaroussel.remove();
+                return;
+              }
+              const titleEl = singleCaroussel.querySelector('#dismissible > #rich-shelf-header-container > #rich-shelf-header > h2 #title-container #title');
+              if (titleEl && titleEl.textContent.trim() === 'Shorts') singleCaroussel.remove();
+            });
+          }
+          function removeShortsCarousselFromSearch() {
+            const videosCaroussel = document.querySelectorAll('grid-shelf-view-model');
+            videosCaroussel.forEach(singleCaroussel => {
+              const titleEl = singleCaroussel.querySelector('yt-section-header-view-model yt-shelf-header-layout h2 > span');
+              if (titleEl && titleEl.textContent.trim() === 'Shorts') singleCaroussel.remove();
+            });
+          }
+          function removeShortsBetweenVideos() {
+            const thumbnails = document.querySelectorAll('ytd-thumbnail a, ytm-thumbnail-overlay-endpoint a');
+            thumbnails.forEach(singleThumbnail => {
+              if (singleThumbnail.href.includes('/shorts/')) {
+                const parent = singleThumbnail.closest('ytd-video-renderer, ytm-video-with-context-renderer, ytm-compact-video-renderer');
+                if (parent) parent.remove();
+              }
+            });
+          }
+          function removeShortsFromVideoArea() {
+            const shortsInVideoSideBar = document.querySelector("ytd-reel-shelf-renderer, ytm-reel-shelf-renderer");
+            if (shortsInVideoSideBar) shortsInVideoSideBar.remove();
+          }
+          function blockShorts() {
+            if (!window._jutoob_block_shorts) return;
+            removeSideBarIcon();
+            removeShortsCaroussel();
+            removeShortsCarousselFromSearch();
+            removeShortsFromVideoArea();
+            removeShortsBetweenVideos();
+          }
+          setInterval(blockShorts, 1000);
+        })();
+    """.trimIndent().replace("\n", " ")
+
+    private val returnDislikeScript = """
+        (function() {
+          if (window._jutoob_ryd_injected) return;
+          window._jutoob_ryd_injected = true;
+          function formatCount(c) {
+            if (c >= 1000000) return (c / 1000000).toFixed(1) + 'M';
+            if (c >= 1000) return (c / 1000).toFixed(1) + 'K';
+            return c.toString();
+          }
+          var _ryd_cache = {};
+          function findDislikeBtn() {
+            var allBtns = document.querySelectorAll('button');
+            for (var i = 0; i < allBtns.length; i++) {
+              var lbl = (allBtns[i].getAttribute('aria-label') || '').toLowerCase();
+              if (lbl.indexOf('dislike') !== -1) return allBtns[i];
+            }
+            for (var i = 0; i < allBtns.length; i++) {
+              if (allBtns[i].textContent.trim() === 'Dislike') return allBtns[i];
+            }
+            var sels = ['#segmented-dislike-button button', 'dislike-button-view-model button', '.segmented-dislike-button button'];
+            for (var j = 0; j < sels.length; j++) { try { var e = document.querySelector(sels[j]); if (e) return e; } catch(x){} }
+            return null;
+          }
+          async function getDislikeCount(videoId) {
+            if (_ryd_cache[videoId]) return _ryd_cache[videoId];
+            var res = await fetch('https://returnyoutubedislikeapi.com/votes?videoId=' + videoId);
+            if (!res.ok) return null;
+            var data = await res.json();
+            _ryd_cache[videoId] = data.dislikes;
+            return data.dislikes;
+          }
+          async function applyDislikes() {
+            var videoId = null;
+            try {
+              videoId = new URL(location.href).searchParams.get('v');
+              if (!videoId) { var m = location.pathname.match(/\/shorts\/([^/?]+)/); if (m) videoId = m[1]; }
+            } catch(e) {}
+            if (!videoId) return false;
+            var btn = findDislikeBtn();
+            if (!btn) return false;
+            var count = await getDislikeCount(videoId);
+            if (count === null) return false;
+            var formatted = formatCount(count);
+            var existing = document.getElementById('ryd-dislikes-val');
+            if (existing) { existing.textContent = formatted; return true; }
+            /* Try replacing a "Dislike" text span inside the button */
+            var spans = btn.querySelectorAll('span');
+            for (var i = 0; i < spans.length; i++) {
+              var t = spans[i].textContent.trim();
+              if (t === 'Dislike' || t === 'dislike') { spans[i].textContent = formatted; spans[i].id = 'ryd-dislikes-val'; return true; }
+            }
+            /* No text span found — create one and append */
+            var el = document.createElement('span');
+            el.id = 'ryd-dislikes-val';
+            el.style.cssText = 'margin-left:6px; font-size:inherit; display:inline-flex; align-items:center; pointer-events:none;';
+            el.textContent = formatted;
+            btn.style.overflow = 'visible';
+            btn.appendChild(el);
+            return true;
+          }
+          function tryApply(n) {
+            applyDislikes().then(function(ok) {
+              if (!ok && n > 0) setTimeout(function() { tryApply(n - 1); }, 2000);
+            }).catch(function() {
+              if (n > 0) setTimeout(function() { tryApply(n - 1); }, 2000);
+            });
+          }
+          tryApply(10);
+          var lastUrl = location.href;
+          new MutationObserver(function() {
+            if (location.href !== lastUrl) {
+              lastUrl = location.href;
+              var old = document.getElementById('ryd-dislikes-val'); if (old) old.remove();
+              setTimeout(function() { tryApply(10); }, 1500);
+            }
+          }).observe(document, { subtree: true, childList: true });
+        })();
+    """.trimIndent().replace("\n", " ")
+
     @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         val splashScreen = installSplashScreen()
         super.onCreate(savedInstanceState)
-        
+
         isNetworkConnected = isNetworkAvailable(this)
-        
+
         val prefs = getPreferences(Context.MODE_PRIVATE)
         val hasFinishedInstallation = prefs.getBoolean("extensions_installed_v6", false)
         val hasConsented = prefs.getBoolean("user_consented", false)
-        
+
         skipSponsorsEnabled = prefs.getBoolean("skip_sponsors_enabled", true)
-        
+        blockShortsEnabled = prefs.getBoolean("block_shorts_enabled", true)
+
         showConsentDialog = !hasConsented
-        
+
         // Only start installation process if we have consent
         if (hasConsented) {
             isInstalling = !hasFinishedInstallation
@@ -230,7 +357,7 @@ class MainActivity : ComponentActivity() {
         splashScreen.setKeepOnScreenCondition {
             !isYoutubeLoaded && isNetworkConnected
         }
-        
+
         splashScreen.setOnExitAnimationListener { viewProvider ->
             val fadeOut = ObjectAnimator.ofFloat(viewProvider.view, View.ALPHA, 1f, 0f)
             fadeOut.duration = 400L
@@ -240,7 +367,7 @@ class MainActivity : ComponentActivity() {
         }
 
         enableEdgeToEdge()
-        
+
         val settings = GeckoRuntimeSettings.Builder()
             .consoleOutput(true)
             .arguments(arrayOf(
@@ -256,20 +383,20 @@ class MainActivity : ComponentActivity() {
                 "--pref", "media.geckoview.autoplay.enabled=true"
             ))
             .build()
-        
+
         try {
             geckoRuntime = GeckoRuntime.create(this, settings)
         } catch (e: Exception) {
             Log.e("JuToob", "CRITICAL ERROR: Failed to create GeckoRuntime", e)
         }
-        
+
         val sessionSettings = GeckoSessionSettings.Builder()
             .useTrackingProtection(true)
             .build()
-            
+
         mainSession = GeckoSession(sessionSettings)
         setupMainSessionDelegates(mainSession!!)
-        
+
         mainSession?.apply {
             open(geckoRuntime!!)
             if (isNetworkConnected) {
@@ -289,11 +416,11 @@ class MainActivity : ComponentActivity() {
                 return GeckoResult.fromValue(WebExtension.PermissionPromptResponse(true, true, true))
             }
         })
-        
+
         if (hasConsented) {
             checkExtensions()
         }
-        
+
         startHeartbeatMonitor()
         requestAudioFocus()
         startPlaybackService()
@@ -304,7 +431,7 @@ class MainActivity : ComponentActivity() {
                 val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
                 val view = LocalView.current
                 val context = LocalContext.current
-                
+
                 var showMenu by remember { mutableStateOf(false) }
                 var showAboutDialog by remember { mutableStateOf(false) }
 
@@ -313,15 +440,49 @@ class MainActivity : ComponentActivity() {
                     containerColor = androidx.compose.ui.graphics.Color.Black
                 ) { paddingValues ->
                     val currentPadding = if (isLandscape) Modifier.fillMaxSize() else Modifier.fillMaxSize().padding(paddingValues)
-                    
+
+                    var pullProgress by remember { mutableStateOf(0f) }
+
                     Box(modifier = currentPadding) {
                         YouTubeGeckoPlayer(
                             session = mainSession!!,
                             runtime = geckoRuntime!!,
                             canGoBackState = canGoBack,
                             modifier = Modifier.fillMaxSize(),
-                            isInstalling = isInstalling
+                            isInstalling = isInstalling,
+                            isAtScrollTop = lastScrollY <= 5,
+                            isPullToRefreshEnabled = !isHomePage && !isLandscape,
+                            onViewReady = { geckoView = it },
+                            onPullProgress = { pullProgress = it },
+                            onPullRelease = { progress ->
+                                if (progress >= 1f) {
+                                    mainSession?.loadUri("javascript:(function(){ " +
+                                        "var v = document.querySelector('video'); " +
+                                        "var t = (v && v.currentTime > 0) ? v.currentTime : 0; " +
+                                        "var s = (v && !v.paused) ? 'R' : 'P'; " +
+                                        "var oldT = document.title; " +
+                                        "document.title = 'JUTOOB_SAVE_' + t + '_' + s; " +
+                                        "setTimeout(function(){ document.title = oldT; }, 100); " +
+                                        "})()")
+                                }
+                                pullProgress = 0f
+                            }
                         )
+
+                        if (pullProgress > 0f) {
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.TopStart)
+                                    .fillMaxWidth(pullProgress)
+                                    .height(3.dp)
+                                    .background(
+                                        if (pullProgress >= 1f)
+                                            androidx.compose.ui.graphics.Color(0xFF4CAF50)
+                                        else
+                                            androidx.compose.ui.graphics.Color(0xFFF44336)
+                                    )
+                            )
+                        }
 
                         // ONLY include installation UI components if the app hasn't been successfully set up yet.
                         if (!hasFinishedInstallation) {
@@ -356,7 +517,7 @@ class MainActivity : ComponentActivity() {
                                             listState.animateScrollToItem(consoleLogs.size - 1)
                                         }
                                     }
-                                    
+
                                     Column {
                                         Box(
                                             modifier = Modifier
@@ -379,7 +540,7 @@ class MainActivity : ComponentActivity() {
                                                 )
                                             }
                                         }
-                                        
+
                                         LazyColumn(
                                             state = listState,
                                             modifier = Modifier.fillMaxSize()
@@ -423,7 +584,7 @@ class MainActivity : ComponentActivity() {
                                         ) {
                                             DropdownMenuItem(
                                                 text = { Text(if (skipSponsorsEnabled) "Skip Sponsors ✓" else "Skip Sponsors") },
-                                                onClick = { 
+                                                onClick = {
                                                     skipSponsorsEnabled = !skipSponsorsEnabled
                                                     prefs.edit().putBoolean("skip_sponsors_enabled", skipSponsorsEnabled).apply()
                                                     mainSession?.loadUri("javascript:window._jutoob_sb_enabled = $skipSponsorsEnabled;")
@@ -431,8 +592,17 @@ class MainActivity : ComponentActivity() {
                                                 }
                                             )
                                             DropdownMenuItem(
+                                                text = { Text(if (blockShortsEnabled) "Block Shorts ✓" else "Block Shorts") },
+                                                onClick = {
+                                                    blockShortsEnabled = !blockShortsEnabled
+                                                    prefs.edit().putBoolean("block_shorts_enabled", blockShortsEnabled).apply()
+                                                    mainSession?.loadUri("javascript:window._jutoob_block_shorts = $blockShortsEnabled;")
+                                                    showMenu = false
+                                                }
+                                            )
+                                            DropdownMenuItem(
                                                 text = { Text("Enjoying jutoob?") },
-                                                onClick = { 
+                                                onClick = {
                                                     showMenu = false
                                                     try {
                                                         val customTabsIntent = CustomTabsIntent.Builder().build()
@@ -455,14 +625,14 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                         }
-                        
+
                         LaunchedEffect(isLandscape) {
                             val window = (view.context as? ComponentActivity)?.window ?: return@LaunchedEffect
                             val controller = WindowCompat.getInsetsController(window, view)
                             if (isLandscape) {
                                 controller.hide(WindowInsetsCompat.Type.systemBars())
                                 controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                                
+
                                 mainSession?.loadUri("javascript:(function() { " +
                                     "var style = document.getElementById('jutoob-fullscreen-style');" +
                                     "if (!style) {" +
@@ -548,16 +718,15 @@ class MainActivity : ComponentActivity() {
                         properties = DialogProperties(dismissOnBackPress = false, dismissOnClickOutside = false)
                     )
                 }
-                
+
                 if (showDownloadDialog && currentVideoId != null) {
                     DownloadDialog(
                         videoId = currentVideoId!!,
                         videoTitle = currentVideoTitle,
-                        token = generateDownloadToken(),
                         onDismiss = { showDownloadDialog = false }
                     )
                 }
-                
+
                 if (showAboutDialog) {
                     AlertDialog(
                         onDismissRequest = { showAboutDialog = false },
@@ -598,31 +767,24 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun generateDownloadToken(): String {
-        val secret = "overflowy2mate"
-        val header = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}"
-        val now = System.currentTimeMillis() / 1000
-        val payload = "{\"authorized\":true,\"timestamp\":${System.currentTimeMillis()},\"iat\":$now,\"exp\":${now + 180}}"
-        
-        val base64Header = Base64.encodeToString(header.toByteArray(), Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
-        val base64Payload = Base64.encodeToString(payload.toByteArray(), Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
-        
-        val data = "$base64Header.$base64Payload"
-        val mac = Mac.getInstance("HmacSHA256")
-        mac.init(SecretKeySpec(secret.toByteArray(), "HmacSHA256"))
-        val signature = mac.doFinal(data.toByteArray())
-        val base64Signature = Base64.encodeToString(signature, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
-        
-        return "$data.$base64Signature"
-    }
-
     override fun onPause() {
         super.onPause()
     }
 
     override fun onResume() {
         super.onResume()
+        lastHeartbeatTime = System.currentTimeMillis()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        mainSession?.setActive(false)
+    }
+
+    override fun onStart() {
+        super.onStart()
         mainSession?.setActive(true)
+        lastHeartbeatTime = System.currentTimeMillis()
     }
 
     override fun onDestroy() {
@@ -676,14 +838,19 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             while (true) {
                 delay(1000)
-                if (isYoutubeLoaded && !isInstalling && isNetworkConnected && !isLiveStream) {
+                if (isYoutubeLoaded && !isInstalling && isNetworkConnected) {
+                    if (isReloading) continue
                     val currentTime = System.currentTimeMillis()
                     if (currentTime - lastHeartbeatTime > reloadTimeout) {
                         Log.e("JuToob", "Heartbeat lost! Re-loading session.")
-                        lastHeartbeatTime = currentTime
+                        isReloading = true
                         mainSession?.reload()
+                        Handler(Looper.getMainLooper()).postDelayed({
+                            isReloading = false
+                            lastHeartbeatTime = System.currentTimeMillis()
+                        }, 30000)
                     }
-                } else {
+                } else if (!isReloading) {
                     lastHeartbeatTime = System.currentTimeMillis()
                 }
             }
@@ -694,29 +861,76 @@ class MainActivity : ComponentActivity() {
         session.contentDelegate = object : GeckoSession.ContentDelegate {
             override fun onTitleChange(session: GeckoSession, title: String?) {
                 if (title == "JUTOOB_DO_DL_V3") {
-                    Handler(Looper.getMainLooper()).post { showDownloadDialog = true }
+                    showDownloadDialog = true
+                    return
+                }
+
+                if (title?.startsWith("JUTOOB_SAVE_") == true) {
+                    val parts = title.removePrefix("JUTOOB_SAVE_").split("_")
+                    val time = if (parts.size == 2) parts[0].toDoubleOrNull() ?: 0.0 else 0.0
+                    val wasPaused = parts.size == 2 && parts[1] == "P"
+                    val pageUrl = currentPageUrl
+                    if (pageUrl != null && time > 0) {
+                        val uri = Uri.parse(pageUrl)
+                        val newUrl = uri.buildUpon()
+                            .clearQuery()
+                            .also { builder ->
+                                uri.queryParameterNames.forEach { param ->
+                                    if (param != "t") builder.appendQueryParameter(param, uri.getQueryParameter(param))
+                                }
+                                builder.appendQueryParameter("t", "${time.toInt()}s")
+                            }
+                            .build().toString()
+                        mainSession?.loadUri(newUrl)
+                    } else {
+                        mainSession?.reload()
+                    }
+                    // Simulate a real tap on the video area to create a trusted user gesture,
+                    // then use that activation window to play/seek the video
+                    val handler = Handler(Looper.getMainLooper())
+                    handler.postDelayed({
+                        val view = geckoView ?: return@postDelayed
+                        val x = view.width / 2f
+                        val y = view.height / 4f
+                        val downTime = android.os.SystemClock.uptimeMillis()
+                        val down = android.view.MotionEvent.obtain(downTime, downTime, android.view.MotionEvent.ACTION_DOWN, x, y, 0)
+                        val up = android.view.MotionEvent.obtain(downTime, downTime + 50, android.view.MotionEvent.ACTION_UP, x, y, 0)
+                        view.dispatchTouchEvent(down)
+                        view.dispatchTouchEvent(up)
+                        down.recycle()
+                        up.recycle()
+                        // After the trusted tap, ensure correct state
+                        handler.postDelayed({
+                            val seekJs = if (time > 0) "if(Math.abs(v.currentTime-$time)>2) v.currentTime=$time;" else ""
+                            val action = if (wasPaused) "if(!v.paused) v.pause();" else "if(v.paused) v.play().catch(function(){});"
+                            mainSession?.loadUri("javascript:(function(){ var v = document.querySelector('video'); if(!v) return; $seekJs $action })()")
+                        }, 500)
+                    }, 5000)
                     return
                 }
 
                 if (title == "JUTOOB_ERR_LONG") {
                     Handler(Looper.getMainLooper()).post { 
-                        Toast.makeText(this@MainActivity, "Videos longer than 90 minutes cannot be downloaded", Toast.LENGTH_LONG).show() 
+                        Toast.makeText(this@MainActivity, "Videos longer than a day cannot be downloaded", Toast.LENGTH_LONG).show()
                     }
                     return
                 }
 
                 if (title == "JUTOOB_LIVE_TRUE") {
                     isLiveStream = true
+                    lastHeartbeatTime = System.currentTimeMillis()
                     return
                 }
 
                 if (title == "JUTOOB_LIVE_FALSE") {
                     isLiveStream = false
+                    lastHeartbeatTime = System.currentTimeMillis()
                     return
                 }
                 
                 if (title?.startsWith("JUTOOB") == true) {
                     lastHeartbeatTime = System.currentTimeMillis()
+                    isReloading = false
                     if (isFirstLoad) {
                         isFirstLoad = false
                         reloadTimeout = 30000L
@@ -750,6 +964,7 @@ class MainActivity : ComponentActivity() {
                 return GeckoResult.fromValue(AllowOrDeny.ALLOW)
             }
             override fun onLocationChange(s: GeckoSession, url: String?, p: List<GeckoSession.PermissionDelegate.ContentPermission>, g: Boolean) {
+                 currentPageUrl = url
                  isHomePage = url?.contains("/watch") != true && url?.contains("/shorts/") != true && url?.contains("/live/") != true
                  isLiveStream = url?.contains("/live/") == true
                  
@@ -772,15 +987,19 @@ class MainActivity : ComponentActivity() {
                  val paddingValue = if (isHomePage) "18px" else "0px"
                  s.loadUri("javascript:(function() { " +
                         "window._jutoob_sb_enabled = $skipSponsorsEnabled; " +
+                        "window._jutoob_block_shorts = $blockShortsEnabled; " +
                         "try { Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36', configurable: false }); } catch(e) {} " +
                         "var bannerStyle = document.getElementById('jutoob-banner-style'); if (!bannerStyle) { bannerStyle = document.createElement('style'); bannerStyle.id = 'jutoob-banner-style'; document.head.appendChild(bannerStyle); } " +
-                        "bannerStyle.innerHTML = ` ytm-app-banner, .open-in-app-banner, ytm-mealbar-promo-renderer, ytd-app-promo-renderer, ytd-smart-app-banner-renderer, ytd-banner-promo-renderer, tp-yt-paper-dialog { display: none !important; } .mobile-topbar-header, ytm-mobile-topbar-renderer { padding-right: $paddingValue !important; } `; " +
+                        "bannerStyle.innerHTML = ` ytm-app-banner, .open-in-app-banner, ytm-mealbar-promo-renderer, ytd-app-promo-renderer, ytd-smart-app-banner-renderer, ytd-banner-promo-renderer { display: none !important; } .mobile-topbar-header, ytm-mobile-topbar-renderer { padding-right: $paddingValue !important; } `; " +
                         "function checkLive() { var isLive = !!(document.querySelector('.ytp-live') || document.querySelector('.badge-style-type-live-now') || !!document.querySelector('[itemprop=\"isLiveBroadcast\"]')); var oldT = document.title; document.title = isLive ? 'JUTOOB_LIVE_TRUE' : 'JUTOOB_LIVE_FALSE'; setTimeout(function(){ document.title = oldT; }, 100); } " +
                         "if (window._jutoob_live_interval) clearInterval(window._jutoob_live_interval); window._jutoob_live_interval = setInterval(checkLive, 5000); checkLive(); " +
                         "})()")
 
+                 s.loadUri("javascript:$blockShortsScript")
+
                  if (url?.contains("/watch") == true || url?.contains("/shorts/") == true || url?.contains("/live/") == true) {
                      s.loadUri("javascript:$sponsorBlockScript")
+                     s.loadUri("javascript:$returnDislikeScript")
                      
                      s.loadUri("javascript:(function() { " +
                         "function injectDownloadBtn() { " +
@@ -799,7 +1018,7 @@ class MainActivity : ComponentActivity() {
                         "  btn.onclick = function(e) { " +
                         "    e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); " +
                         "    var v = document.querySelector('video'); " +
-                        "    if (v && v.duration > 5399) { " +
+                        "    if (v && v.duration > 86399) { " +
                         "      var oldT = document.title; " +
                         "      document.title = 'JUTOOB_ERR_LONG'; " +
                         "      setTimeout(function() { document.title = oldT; }, 100); " +
@@ -815,10 +1034,11 @@ class MainActivity : ComponentActivity() {
                         "  if (logo) logo.insertAdjacentElement('afterend', btn); " +
                         "} " +
                         "injectDownloadBtn(); " +
-                        "if (!window._jutoob_observer) { " +
-                        "  window._jutoob_observer = new MutationObserver(injectDownloadBtn); " +
-                        "  window._jutoob_observer.observe(document.body, { childList: true, subtree: true }); " +
-                        "} " +
+                        "if (window._jutoob_observer) window._jutoob_observer.disconnect(); " +
+                        "window._jutoob_observer = new MutationObserver(injectDownloadBtn); " +
+                        "window._jutoob_observer.observe(document.body, { childList: true, subtree: true }); " +
+                        "if (window._jutoob_dl_interval) clearInterval(window._jutoob_dl_interval); " +
+                        "window._jutoob_dl_interval = setInterval(injectDownloadBtn, 2000); " +
                         "})()")
                  }
             }
@@ -870,8 +1090,8 @@ class MainActivity : ComponentActivity() {
                 return@launch
             }
 
-            val xpiExtensions = listOf("background_playback.xpi", "nonstop_playing.xpi", "block_shorts.xpi", "ultimate_adblocker.xpi")
-            val builtInExtensions = listOf("youtube_cleaner_extension/" to "Interface Cleaner", "youtube_autolike/" to "Autolike Subscribed", "members_only_hider/" to "Remove Members Only")
+            val xpiExtensions = listOf("background_playback.xpi", "nonstop_playing.xpi", "ultimate_adblocker.xpi")
+            val builtInExtensions = listOf("youtube_cleaner_extension/" to "Interface Cleaner", "youtube_autolike/" to "Like Subscribed", "members_only_hider/" to "Members Only Hider")
 
             logAndConsole("Installing browser extensions...")
 
@@ -937,12 +1157,27 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun YouTubeGeckoPlayer(
-    session: GeckoSession, 
-    runtime: GeckoRuntime, 
+    session: GeckoSession,
+    runtime: GeckoRuntime,
     canGoBackState: Boolean,
     modifier: Modifier = Modifier,
-    isInstalling: Boolean = false
+    isInstalling: Boolean = false,
+    isAtScrollTop: Boolean = true,
+    isPullToRefreshEnabled: Boolean = false,
+    onViewReady: (GeckoView) -> Unit = {},
+    onPullProgress: (Float) -> Unit = {},
+    onPullRelease: (Float) -> Unit = {}
 ) {
+    val atTopState = remember { mutableStateOf(true) }
+    val pullEnabledState = remember { mutableStateOf(false) }
+    val progressCallback = remember { mutableStateOf<(Float) -> Unit>({}) }
+    val releaseCallback = remember { mutableStateOf<(Float) -> Unit>({}) }
+
+    atTopState.value = isAtScrollTop
+    pullEnabledState.value = isPullToRefreshEnabled
+    progressCallback.value = onPullProgress
+    releaseCallback.value = onPullRelease
+
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(session, lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
@@ -956,109 +1191,61 @@ fun YouTubeGeckoPlayer(
     }
 
     BackHandler { if (canGoBackState) session.goBack() }
-    
+
     AndroidView(
         modifier = modifier,
         factory = { ctx ->
+            val threshold = 150f * ctx.resources.displayMetrics.density
+            var pullStartY = 0f
+            var isPulling = false
+
             GeckoView(ctx).apply {
                 setSession(session)
                 setBackgroundColor(Color.BLACK)
+
+                setOnTouchListener { _, event ->
+                    when (event.actionMasked) {
+                        android.view.MotionEvent.ACTION_DOWN -> {
+                            if (pullEnabledState.value && atTopState.value) {
+                                pullStartY = event.y
+                                isPulling = true
+                            }
+                        }
+                        android.view.MotionEvent.ACTION_MOVE -> {
+                            if (isPulling) {
+                                if (!atTopState.value) {
+                                    progressCallback.value(0f)
+                                    isPulling = false
+                                } else {
+                                    val dy = event.y - pullStartY
+                                    if (dy > 0) {
+                                        progressCallback.value((dy / threshold).coerceIn(0f, 1f))
+                                    } else {
+                                        progressCallback.value(0f)
+                                    }
+                                }
+                            }
+                        }
+                        android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> {
+                            if (isPulling) {
+                                val dy = event.y - pullStartY
+                                val progress = if (atTopState.value && dy > 0) (dy / threshold).coerceIn(0f, 1f) else 0f
+                                releaseCallback.value(progress)
+                                isPulling = false
+                            }
+                        }
+                    }
+                    false
+                }
+
                 viewTreeObserver.addOnWindowFocusChangeListener { hasFocus ->
                     if (hasFocus && !isInstalling) session.setActive(true)
                 }
-            }
+            }.also { onViewReady(it) }
         },
         update = { view ->
             view.setBackgroundColor(Color.BLACK)
             if (view.isShown && !isInstalling) session.setActive(true)
         }
     )
-}
-
-@Composable
-fun DownloadDialog(videoId: String, videoTitle: String, token: String, onDismiss: () -> Unit) {
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth(0.80f)
-                .fillMaxHeight(0.65f)
-                .clip(RoundedCornerShape(16.dp))
-                .background(androidx.compose.ui.graphics.Color(0xFF374151))
-                .border(1.dp, androidx.compose.ui.graphics.Color(0xFF333333), RoundedCornerShape(16.dp))
-        ) {
-            Column {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(1.dp)
-                ) {
-                    TextButton(
-                        onClick = onDismiss,
-                        modifier = Modifier.align(Alignment.CenterEnd)
-                    ) {
-                        Text("X", color = MaterialTheme.colorScheme.primary)
-                    }
-                }
-                
-                AndroidView(
-                    modifier = Modifier.fillMaxSize(),
-                    factory = { context ->
-                        android.webkit.WebView(context).apply {
-                            settings.javaScriptEnabled = true
-                            settings.domStorageEnabled = true
-                            settings.setSupportZoom(false)
-                            settings.builtInZoomControls = false
-                            settings.useWideViewPort = true
-                            settings.loadWithOverviewMode = true
-                            
-                            webViewClient = object : WebViewClient() {
-                                override fun onPageFinished(view: WebView?, url: String?) {
-                                    super.onPageFinished(view, url)
-                                    view?.loadUrl("javascript:(function() { " +
-                                        "document.body.style.margin='0'; " +
-                                        "document.body.style.padding='0'; " +
-                                        "var container = document.querySelector('.container') || document.body; " +
-                                        "container.style.display = 'block'; " +
-                                        "container.style.paddingTop = '0'; " +
-                                        "var si = setInterval(function() { window.scrollTo(0, 0); document.documentElement.scrollTop = 0; }, 100); " +
-                                        "setTimeout(function() { clearInterval(si); }, 2000); " +
-                                        "})()")
-                                }
-                            }
-                            
-                            setDownloadListener { url, userAgent, contentDisposition, mimetype, contentLength ->
-                                val ext = if (mimetype.contains("audio")) "mp3" else "mp4"
-                                val safeTitle = videoTitle.replace("[^a-zA-Z0-9.-]".toRegex(), " ").replace("\\s+".toRegex(), " ").trim().trim('.').ifEmpty { "untitled" }
-                                val fileName = "${safeTitle}.$ext"
-
-                                val request = DownloadManager.Request(Uri.parse(url))
-                                    .setTitle(fileName)
-                                    .setDescription("jutoob download")
-                                    .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                                    .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, "jutoob/$fileName")
-                                    .addRequestHeader("User-Agent", userAgent)
-
-                                val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-                                try {
-                                    dm.enqueue(request)
-                                    Toast.makeText(context, "Downloading: $fileName", Toast.LENGTH_SHORT).show()
-                                } catch (e: Exception) {
-                                    Toast.makeText(context, "Download failed: ${e.message}", Toast.LENGTH_LONG).show()
-                                }
-                                
-                                onDismiss()
-                            }
-                            
-                            val youtubeUrl = "https://youtube.com/watch?v=$videoId"
-                            val iframeUrl = "https://meowing.ssstik.art/download?url=${Uri.encode(youtubeUrl)}&token=$token"
-                            loadUrl(iframeUrl)
-                        }
-                    }
-                )
-            }
-        }
-    }
 }

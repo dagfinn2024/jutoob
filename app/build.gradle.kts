@@ -11,8 +11,8 @@ android {
         applicationId = "com.ju.toob"
         minSdk = 28
         targetSdk = 35
-        versionCode = 30
-        versionName = "3.0"
+        versionCode = 36
+        versionName = "3.6"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -52,6 +52,7 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
+        isCoreLibraryDesugaringEnabled = true
     }
     kotlinOptions {
         jvmTarget = "11"
@@ -99,10 +100,19 @@ dependencies {
     implementation(libs.androidx.compose.ui.graphics)
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
+    implementation("io.coil-kt:coil-compose:2.6.0")
     
     implementation(libs.geckoview)
     implementation(libs.androidx.core.splashscreen)
     implementation(libs.androidx.browser)
+
+    implementation(libs.newpipeextractor)
+    implementation(libs.okhttp)
+    implementation(libs.json)
+    implementation("com.github.NorthernCaptain:TAndroidLame:1.1") {
+        exclude(group = "com.android.support")
+    }
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs_nio:2.1.4")
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
