@@ -6,6 +6,7 @@ import android.content.Context
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
+import android.media.MediaMuxer
 import android.media.MediaScannerConnection
 import android.os.Environment
 import android.util.Log
@@ -44,6 +45,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.schabi.newpipe.extractor.NewPipe
@@ -52,8 +54,9 @@ import org.schabi.newpipe.extractor.downloader.Downloader
 import org.schabi.newpipe.extractor.downloader.Request
 import org.schabi.newpipe.extractor.downloader.Response
 import org.schabi.newpipe.extractor.exceptions.ReCaptchaException
-import com.naman14.androidlame.LameBuilder
+import org.schabi.newpipe.extractor.stream.AudioTrackType
 import org.schabi.newpipe.extractor.stream.StreamInfo
+import com.naman14.androidlame.LameBuilder
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
@@ -65,6 +68,8 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import okhttp3.OkHttpClient
 import okhttp3.RequestBody.Companion.toRequestBody
+
+val downloadProgressState = MutableStateFlow(-1f)
 
 private const val TAG = "JutoobDiagnostic"
 private const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -153,8 +158,11 @@ private val downloadClient = OkHttpClient.Builder()
     .followRedirects(true)
     .followSslRedirects(true)
     .connectTimeout(30, TimeUnit.SECONDS)
-    .readTimeout(60, TimeUnit.SECONDS)
+    .readTimeout(5, TimeUnit.MINUTES)
     .build()
+
+private const val MAX_DOWNLOAD_RETRIES = 5
+private const val RETRY_BASE_DELAY_MS = 1000L
 
 /**
  * Get file size using OkHttp.
@@ -162,15 +170,21 @@ private val downloadClient = OkHttpClient.Builder()
  * If that fails (YouTube DASH streams often omit it), falls back to a
  * Range request (bytes=0-0) and parses Content-Range for the total size.
  */
-fun getFileSizeMB(streamUrl: String): String? {
+fun getFileSizeBytes(streamUrl: String): Long {
     return try {
-        val probe = probeServer(streamUrl)
-        if (probe.contentLength > 0) {
-            String.format("%.1f MB", probe.contentLength / (1024.0 * 1024.0))
-        } else null
+        probeServer(streamUrl).contentLength
     } catch (_: Exception) {
-        null
+        -1L
     }
+}
+
+fun getFileSizeMB(streamUrl: String): String? {
+    val bytes = getFileSizeBytes(streamUrl)
+    return if (bytes > 0) String.format("%.1f MB", bytes / (1024.0 * 1024.0)) else null
+}
+
+fun formatBytes(bytes: Long): String? {
+    return if (bytes > 0) String.format("%.1f MB", bytes / (1024.0 * 1024.0)) else null
 }
 
 private data class ServerProbe(val contentLength: Long, val supportsRanges: Boolean)
@@ -231,7 +245,8 @@ data class StreamOption(
     val resolution: String,
     val format: String,
     val isAudio: Boolean,
-    val fileSize: String?
+    val fileSize: String?,
+    val audioUrl: String? = null
 )
 
 @Composable
@@ -254,39 +269,65 @@ fun DownloadDialog(videoId: String, videoTitle: String, onDismiss: () -> Unit) {
                 val audioStreams = streamInfo.audioStreams ?: emptyList()
                 val videoStreams = streamInfo.videoStreams ?: emptyList()
                 val videoOnlyStreams = streamInfo.videoOnlyStreams ?: emptyList()
-                val allVideoStreams = videoStreams + videoOnlyStreams
 
-                // 360p MP4
-                val video360 = allVideoStreams
-                    .filter { it.format?.suffix?.lowercase() == "mp4" && it.resolution?.contains("360") == true }
-                    .maxByOrNull { it.bitrate }
-
-                // 720p MP4
-                val video720 = allVideoStreams
-                    .filter { it.format?.suffix?.lowercase() == "mp4" && it.resolution?.contains("720") == true }
-                    .maxByOrNull { it.bitrate }
-
-                // ~136kbps m4a audio
-                val audio136 = audioStreams
+                // Original-language m4a audio only (no dubs)
+                val originalM4a = audioStreams
                     .filter { it.format?.suffix?.lowercase() == "m4a" }
+                    .filter {
+                        val type = it.audioTrackType
+                        type == null || type == AudioTrackType.ORIGINAL
+                    }
+                    .ifEmpty {
+                        // Fallback: if nothing is tagged ORIGINAL, use all m4a
+                        audioStreams.filter { it.format?.suffix?.lowercase() == "m4a" }
+                    }
+
+                // Best original m4a for muxing with video-only streams
+                val bestAudio = originalM4a.maxByOrNull { it.bitrate }
+
+                // ~136kbps original m4a for standalone audio download
+                val audio136 = originalM4a
                     .minByOrNull { kotlin.math.abs(it.bitrate - 136000) }
 
                 val result = mutableListOf<StreamOption>()
 
-                video720?.let {
-                    val size = getFileSizeMB(it.content)
-                    val suffix = if (it.isVideoOnly) " ⚡" else ""
-                    result.add(StreamOption(it.content, "720p$suffix", "mp4", false, size))
+                // Helper: find best stream for a resolution (muxed preferred, fallback to video-only + audio)
+                fun findStream(res: String): StreamOption? {
+                    val muxed = videoStreams
+                        .filter { it.format?.suffix?.lowercase() == "mp4" && it.resolution?.contains(res) == true }
+                        .maxByOrNull { it.bitrate }
+                    if (muxed != null) {
+                        val size = getFileSizeMB(muxed.content)
+                        return StreamOption(muxed.content, "${res}p", "mp4", false, size)
+                    }
+                    val videoOnly = videoOnlyStreams
+                        .filter { it.format?.suffix?.lowercase() == "mp4" && it.resolution?.contains(res) == true }
+                        .maxByOrNull { it.bitrate }
+                    if (videoOnly != null && bestAudio != null) {
+                        val videoBytes = getFileSizeBytes(videoOnly.content)
+                        val audioBytes = getFileSizeBytes(bestAudio.content)
+                        val combinedSize = if (videoBytes > 0 && audioBytes > 0) formatBytes(videoBytes + audioBytes) else getFileSizeMB(videoOnly.content)
+                        return StreamOption(videoOnly.content, "${res}p", "mp4", false, combinedSize, audioUrl = bestAudio.content)
+                    }
+                    return null
                 }
 
-                video360?.let {
-                    val size = getFileSizeMB(it.content)
-                    result.add(StreamOption(it.content, "360p", "mp4", false, size))
+                // 720p + 360p preferred; if no 720p, offer 480p + 360p instead
+                val stream720 = findStream("720")
+                if (stream720 != null) {
+                    result.add(stream720)
+                } else {
+                    findStream("480")?.let { result.add(it) }
                 }
+                findStream("360")?.let { result.add(it) }
 
                 audio136?.let {
-                    val size = getFileSizeMB(it.content)
-                    result.add(StreamOption(it.content, "128kbps", "mp3", true, size))
+                    val sizeBytes = getFileSizeBytes(it.content)
+                    val size = if (sizeBytes > 0) formatBytes(sizeBytes) else null
+                    val isLarge = sizeBytes > 30L * 1024 * 1024
+                    val format = if (isLarge) "m4a" else "mp3"
+                    val label = if (isLarge) "${it.bitrate / 1000}kbps" else "128kbps"
+                    result.add(StreamOption(it.content, label, format, true, size))
                 }
 
                 options = result
@@ -447,33 +488,45 @@ private suspend fun downloadRange(
     cookies: String?,
     bytesDownloaded: AtomicLong
 ) = withContext(Dispatchers.IO) {
-    val request = okhttp3.Request.Builder()
-        .url(url)
-        .header("User-Agent", USER_AGENT)
-        .header("Range", "bytes=$startByte-$endByte")
-        .apply { if (!cookies.isNullOrEmpty()) header("Cookie", cookies) }
-        .build()
+    var written = 0L
+    for (attempt in 1..MAX_DOWNLOAD_RETRIES) {
+        try {
+            val resumeStart = startByte + written
+            val request = okhttp3.Request.Builder()
+                .url(url)
+                .header("User-Agent", USER_AGENT)
+                .header("Range", "bytes=$resumeStart-$endByte")
+                .apply { if (!cookies.isNullOrEmpty()) header("Cookie", cookies) }
+                .build()
 
-    val response = downloadClient.newCall(request).execute()
-    if (!response.isSuccessful && response.code != 206) {
-        response.close()
-        throw IOException("Range download failed: HTTP ${response.code}")
-    }
-
-    val body = response.body ?: throw IOException("Empty response body")
-    val buffer = ByteArray(DOWNLOAD_BUFFER_SIZE)
-
-    RandomAccessFile(destFile, "rw").use { raf ->
-        raf.seek(startByte)
-        body.byteStream().use { input ->
-            var n: Int
-            while (input.read(buffer).also { n = it } != -1) {
-                raf.write(buffer, 0, n)
-                bytesDownloaded.addAndGet(n.toLong())
+            val response = downloadClient.newCall(request).execute()
+            if (!response.isSuccessful && response.code != 206) {
+                response.close()
+                throw IOException("Range download failed: HTTP ${response.code}")
             }
+
+            val body = response.body ?: throw IOException("Empty response body")
+            val buffer = ByteArray(DOWNLOAD_BUFFER_SIZE)
+
+            RandomAccessFile(destFile, "rw").use { raf ->
+                raf.seek(resumeStart)
+                body.byteStream().use { input ->
+                    var n: Int
+                    while (input.read(buffer).also { n = it } != -1) {
+                        raf.write(buffer, 0, n)
+                        written += n
+                        bytesDownloaded.addAndGet(n.toLong())
+                    }
+                }
+            }
+            response.close()
+            return@withContext // success
+        } catch (e: IOException) {
+            Log.w(TAG, "Range download attempt $attempt failed: ${e.message}")
+            if (attempt == MAX_DOWNLOAD_RETRIES) throw e
+            kotlinx.coroutines.delay(RETRY_BASE_DELAY_MS * attempt)
         }
     }
-    response.close()
 }
 
 private suspend fun singleStreamDownload(
@@ -481,58 +534,74 @@ private suspend fun singleStreamDownload(
     destFile: File,
     cookies: String?,
     totalSize: Long,
-    notification: DownloadNotification
+    notification: DownloadNotification,
+    onProgress: ((Float) -> Unit)? = null
 ) = withContext(Dispatchers.IO) {
-    val request = okhttp3.Request.Builder()
-        .url(url)
-        .header("User-Agent", USER_AGENT)
-        .apply { if (!cookies.isNullOrEmpty()) header("Cookie", cookies) }
-        .build()
-
-    val response = downloadClient.newCall(request).execute()
-    if (!response.isSuccessful) {
-        response.close()
-        throw IOException("Download failed: HTTP ${response.code}")
-    }
-
-    val body = response.body ?: throw IOException("Empty response body")
-    val buffer = ByteArray(DOWNLOAD_BUFFER_SIZE)
     var downloaded = 0L
     var lastUpdate = 0L
 
-    FileOutputStream(destFile).use { fos ->
-        body.byteStream().use { input ->
-            var n: Int
-            while (input.read(buffer).also { n = it } != -1) {
-                fos.write(buffer, 0, n)
-                downloaded += n
-                val now = System.currentTimeMillis()
-                if (now - lastUpdate >= PROGRESS_UPDATE_INTERVAL_MS) {
-                    lastUpdate = now
-                    if (totalSize > 0) {
-                        val pct = ((downloaded * 100) / totalSize).toInt()
-                        notification.progress(pct, String.format("%.1f / %.1f MB (%d%%)",
-                            downloaded / (1024.0 * 1024.0), totalSize / (1024.0 * 1024.0), pct))
-                    } else {
-                        notification.indeterminate(String.format("%.1f MB downloaded", downloaded / (1024.0 * 1024.0)))
+    for (attempt in 1..MAX_DOWNLOAD_RETRIES) {
+        try {
+            val request = okhttp3.Request.Builder()
+                .url(url)
+                .header("User-Agent", USER_AGENT)
+                .apply {
+                    if (!cookies.isNullOrEmpty()) header("Cookie", cookies)
+                    if (downloaded > 0) header("Range", "bytes=$downloaded-")
+                }
+                .build()
+
+            val response = downloadClient.newCall(request).execute()
+            if (!response.isSuccessful && response.code != 206) {
+                response.close()
+                throw IOException("Download failed: HTTP ${response.code}")
+            }
+
+            val body = response.body ?: throw IOException("Empty response body")
+            val buffer = ByteArray(DOWNLOAD_BUFFER_SIZE)
+
+            FileOutputStream(destFile, downloaded > 0).use { fos ->
+                body.byteStream().use { input ->
+                    var n: Int
+                    while (input.read(buffer).also { n = it } != -1) {
+                        fos.write(buffer, 0, n)
+                        downloaded += n
+                        val now = System.currentTimeMillis()
+                        if (now - lastUpdate >= PROGRESS_UPDATE_INTERVAL_MS) {
+                            lastUpdate = now
+                            if (totalSize > 0) {
+                                val pct = ((downloaded * 100) / totalSize).toInt()
+                                notification.progress(pct, String.format("%.1f / %.1f MB (%d%%)",
+                                    downloaded / (1024.0 * 1024.0), totalSize / (1024.0 * 1024.0), pct))
+                                onProgress?.invoke(pct.toFloat())
+                            } else {
+                                notification.indeterminate(String.format("%.1f MB downloaded", downloaded / (1024.0 * 1024.0)))
+                            }
+                        }
                     }
                 }
             }
+            response.close()
+            return@withContext // success
+        } catch (e: IOException) {
+            Log.w(TAG, "Single stream download attempt $attempt failed (${downloaded} bytes so far): ${e.message}")
+            if (attempt == MAX_DOWNLOAD_RETRIES) throw e
+            kotlinx.coroutines.delay(RETRY_BASE_DELAY_MS * attempt)
         }
     }
-    response.close()
 }
 
 private suspend fun parallelDownload(
     url: String,
     destFile: File,
-    notification: DownloadNotification
+    notification: DownloadNotification,
+    onProgress: ((Float) -> Unit)? = null
 ) = coroutineScope {
     val cookies = try { CookieManager.getInstance().getCookie(url) } catch (_: Exception) { null }
     val probe = probeServer(url)
 
     if (!probe.supportsRanges) {
-        singleStreamDownload(url, destFile, cookies, probe.contentLength, notification)
+        singleStreamDownload(url, destFile, cookies, probe.contentLength, notification, onProgress)
         return@coroutineScope
     }
 
@@ -551,6 +620,7 @@ private suspend fun parallelDownload(
             val pct = ((dl * 100) / totalSize).toInt()
             notification.progress(pct, String.format("%.1f / %.1f MB (%d%%)",
                 dl / (1024.0 * 1024.0), totalSize / (1024.0 * 1024.0), pct))
+            onProgress?.invoke(pct.toFloat())
         }
     }
 
@@ -574,28 +644,38 @@ fun performDownload(context: Context, title: String, option: StreamOption) {
         performMp3Download(context, title, option)
         return
     }
+    if (option.audioUrl != null) {
+        performMuxedDownload(context, title, option)
+        return
+    }
     val cleanTitle = sanitizeFileName(title)
     val fileName = "$cleanTitle.${option.format}"
     val notification = DownloadNotification(context, fileName)
     notification.progress(0, "Starting download...")
     Toast.makeText(context, "Download started", Toast.LENGTH_SHORT).show()
 
+    downloadProgressState.value = 0f
     CoroutineScope(Dispatchers.IO).launch {
         val downloadsDir = File(
-            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "JuToob"
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "jutoob"
         )
         downloadsDir.mkdirs()
         val destFile = File(downloadsDir, fileName)
 
         try {
-            parallelDownload(option.url, destFile, notification)
+            parallelDownload(option.url, destFile, notification) { pct ->
+                downloadProgressState.value = pct
+            }
 
-            MediaScannerConnection.scanFile(context, arrayOf(destFile.absolutePath), arrayOf("video/mp4"), null)
+            val mimeType = if (option.isAudio) "audio/mp4" else "video/mp4"
+            MediaScannerConnection.scanFile(context, arrayOf(destFile.absolutePath), arrayOf(mimeType), null)
 
+            downloadProgressState.value = 100f
             withContext(Dispatchers.Main) {
                 notification.complete("Download complete")
-                Toast.makeText(context, "Saved to Downloads/JuToob/", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "Saved to Downloads/jutoob/", Toast.LENGTH_SHORT).show()
             }
+            kotlinx.coroutines.delay(1800)
         } catch (e: Exception) {
             Log.e(TAG, "Download error", e)
             destFile.delete()
@@ -603,27 +683,199 @@ fun performDownload(context: Context, title: String, option: StreamOption) {
                 notification.error("Download failed")
                 Toast.makeText(context, "Download failed: ${e.message}", Toast.LENGTH_LONG).show()
             }
+        } finally {
+            downloadProgressState.value = -1f
         }
     }
+}
+
+private fun performMuxedDownload(context: Context, title: String, option: StreamOption) {
+    val cleanTitle = sanitizeFileName(title)
+    val fileName = "$cleanTitle.mp4"
+    val notification = DownloadNotification(context, fileName)
+    notification.progress(0, "Starting download...")
+    Toast.makeText(context, "Download started", Toast.LENGTH_SHORT).show()
+
+    downloadProgressState.value = 0f
+    CoroutineScope(Dispatchers.IO).launch {
+        val downloadsDir = File(
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "jutoob"
+        )
+        downloadsDir.mkdirs()
+        val destFile = File(downloadsDir, fileName)
+        val tempVideoFile = File(context.cacheDir, "mux_video_${System.currentTimeMillis()}.mp4")
+        val tempAudioFile = File(context.cacheDir, "mux_audio_${System.currentTimeMillis()}.m4a")
+
+        try {
+            parallelDownload(option.url, tempVideoFile, notification) { pct ->
+                downloadProgressState.value = pct * 0.85f
+            }
+
+            notification.indeterminate("Downloading audio...")
+            parallelDownload(option.audioUrl!!, tempAudioFile, notification) { pct ->
+                downloadProgressState.value = 85f + pct * 0.14f
+            }
+
+            downloadProgressState.value = 99f
+            notification.indeterminate("Combining audio and video...")
+            muxVideoAudio(tempVideoFile, tempAudioFile, destFile)
+
+            MediaScannerConnection.scanFile(context, arrayOf(destFile.absolutePath), arrayOf("video/mp4"), null)
+
+            downloadProgressState.value = 100f
+            withContext(Dispatchers.Main) {
+                notification.complete("Download complete")
+                Toast.makeText(context, "Saved to Downloads/jutoob/", Toast.LENGTH_SHORT).show()
+            }
+            kotlinx.coroutines.delay(1800)
+        } catch (e: Exception) {
+            Log.e(TAG, "Muxed download error", e)
+            destFile.delete()
+            withContext(Dispatchers.Main) {
+                notification.error("Download failed")
+                Toast.makeText(context, "Download failed: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+        } finally {
+            tempVideoFile.delete()
+            tempAudioFile.delete()
+            downloadProgressState.value = -1f
+        }
+    }
+}
+
+@android.annotation.SuppressLint("WrongConstant")
+private fun writeSamples(extractor: MediaExtractor, muxer: MediaMuxer, trackIndex: Int, buffer: ByteBuffer, bufferInfo: MediaCodec.BufferInfo) {
+    while (true) {
+        val sampleSize = extractor.readSampleData(buffer, 0)
+        if (sampleSize < 0) break
+        bufferInfo.offset = 0
+        bufferInfo.size = sampleSize
+        bufferInfo.presentationTimeUs = extractor.sampleTime
+        bufferInfo.flags = extractor.sampleFlags
+        muxer.writeSampleData(trackIndex, buffer, bufferInfo)
+        extractor.advance()
+    }
+}
+
+private suspend fun muxVideoAudio(videoFile: File, audioFile: File, outputFile: File) = withContext(Dispatchers.IO) {
+    val muxer = MediaMuxer(outputFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+
+    val videoExtractor = MediaExtractor()
+    videoExtractor.setDataSource(videoFile.absolutePath)
+    var videoTrackIndex = -1
+    for (i in 0 until videoExtractor.trackCount) {
+        val format = videoExtractor.getTrackFormat(i)
+        val mime = format.getString(MediaFormat.KEY_MIME) ?: ""
+        if (mime.startsWith("video/")) {
+            videoTrackIndex = muxer.addTrack(format)
+            videoExtractor.selectTrack(i)
+            break
+        }
+    }
+
+    val audioExtractor = MediaExtractor()
+    audioExtractor.setDataSource(audioFile.absolutePath)
+    var audioTrackIndex = -1
+    for (i in 0 until audioExtractor.trackCount) {
+        val format = audioExtractor.getTrackFormat(i)
+        val mime = format.getString(MediaFormat.KEY_MIME) ?: ""
+        if (mime.startsWith("audio/")) {
+            audioTrackIndex = muxer.addTrack(format)
+            audioExtractor.selectTrack(i)
+            break
+        }
+    }
+
+    if (videoTrackIndex < 0 || audioTrackIndex < 0) {
+        videoExtractor.release()
+        audioExtractor.release()
+        muxer.release()
+        throw IOException("Could not find video/audio tracks for muxing")
+    }
+
+    muxer.start()
+
+    val buffer = ByteBuffer.allocate(1024 * 1024)
+    val bufferInfo = MediaCodec.BufferInfo()
+
+    // Write video samples
+    writeSamples(videoExtractor, muxer, videoTrackIndex, buffer, bufferInfo)
+
+    // Write audio samples
+    writeSamples(audioExtractor, muxer, audioTrackIndex, buffer, bufferInfo)
+
+    muxer.stop()
+    muxer.release()
+    videoExtractor.release()
+    audioExtractor.release()
 }
 
 private fun performMp3Download(context: Context, title: String, option: StreamOption) {
     val cleanTitle = sanitizeFileName(title)
     val notification = DownloadNotification(context, "$cleanTitle.mp3")
     notification.progress(0, "Downloading audio...")
-    Toast.makeText(context, "Downloading...", Toast.LENGTH_SHORT).show()
+    Toast.makeText(context, "Download started", Toast.LENGTH_SHORT).show()
 
+    downloadProgressState.value = 0f
     CoroutineScope(Dispatchers.IO).launch {
         val downloadsDir = File(
-            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "JuToob"
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "jutoob"
         )
         downloadsDir.mkdirs()
         val m4aFile = File(downloadsDir, "$cleanTitle.m4a")
 
         try {
-            parallelDownload(option.url, m4aFile, notification)
+            val downloadStart = System.currentTimeMillis()
+            parallelDownload(option.url, m4aFile, notification) { pct ->
+                downloadProgressState.value = pct * 0.1f
+            }
+            val downloadDuration = System.currentTimeMillis() - downloadStart
+            downloadProgressState.value = 10f
+
             notification.indeterminate("Converting to MP3...")
-            convertM4aToMp3(context, cleanTitle, notification)
+
+            // Simulate progress 10→99% during conversion, paced from the download duration.
+            // Files >10MB have slower conversion relative to download, so use slower pacing.
+            val fileSize = m4aFile.length()
+            val isMediumFile = fileSize > 10L * 1024 * 1024 // 10-30MB range
+            val estimatedMs = if (isMediumFile) maxOf(downloadDuration * 5, 8000L) else maxOf(downloadDuration * 2, 3000L)
+            val tickMs = 100L
+            val baseIncrement = 89f / (estimatedMs / tickMs)
+            val progressJob = CoroutineScope(Dispatchers.IO).launch {
+                var current = 10f
+                while (current < 99f) {
+                    delay(tickMs)
+                    val factor = if (isMediumFile) when {
+                        current < 20f -> 0.20f
+                        current < 40f -> 0.16f
+                        current < 60f -> 0.12f
+                        current < 80f -> 0.08f
+                        current < 90f -> 0.04f
+                        current < 95f -> 0.02f
+                        else -> 0.01f
+                    } else when {
+                        current < 30f -> 0.20f
+                        current < 50f -> 0.16f
+                        current < 65f -> 0.12f
+                        current < 80f -> 0.08f
+                        current < 90f -> 0.04f
+                        current < 95f -> 0.02f
+                        else -> 0.01f
+                    }
+                    current = minOf(current + baseIncrement * factor, 99f)
+                    downloadProgressState.value = current
+                }
+            }
+
+            convertM4aToMp3(context, cleanTitle)
+            progressJob.cancel()
+
+            downloadProgressState.value = 100f
+            withContext(Dispatchers.Main) {
+                notification.complete("Download complete")
+                Toast.makeText(context, "Saved to Downloads/jutoob/", Toast.LENGTH_SHORT).show()
+            }
+            delay(1800)
         } catch (e: Exception) {
             Log.e(TAG, "MP3 download/convert error", e)
             m4aFile.delete()
@@ -631,20 +883,21 @@ private fun performMp3Download(context: Context, title: String, option: StreamOp
                 notification.error("Failed: ${e.message}")
                 Toast.makeText(context, "Download failed: ${e.message}", Toast.LENGTH_LONG).show()
             }
+        } finally {
+            downloadProgressState.value = -1f
         }
     }
 }
 
-private suspend fun convertM4aToMp3(context: Context, cleanTitle: String, notification: DownloadNotification) =
+private suspend fun convertM4aToMp3(context: Context, cleanTitle: String) =
     withContext(Dispatchers.IO) {
         val downloadsDir = File(
-            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "JuToob"
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "jutoob"
         )
         val m4aFile = File(downloadsDir, "$cleanTitle.m4a")
         val mp3File = File(downloadsDir, "$cleanTitle.mp3")
         val tempMp3 = File(context.cacheDir, "temp_audio.mp3")
         try {
-            // Decode AAC → PCM
             val extractor = MediaExtractor()
             extractor.setDataSource(m4aFile.absolutePath)
 
@@ -713,7 +966,6 @@ private suspend fun convertM4aToMp3(context: Context, cleanTitle: String, notifi
             codec.release()
             extractor.release()
 
-            // Encode PCM → MP3 with LAME
             val androidLame = LameBuilder()
                 .setInSampleRate(sampleRate)
                 .setOutChannels(channels)
@@ -740,28 +992,19 @@ private suspend fun convertM4aToMp3(context: Context, cleanTitle: String, notifi
 
             androidLame.close()
 
-            // Move MP3 to Downloads, delete M4A
             tempMp3.copyTo(mp3File, overwrite = true)
             tempMp3.delete()
             m4aFile.delete()
 
             MediaScannerConnection.scanFile(
                 context,
-                arrayOf(mp3File.absolutePath, m4aFile.absolutePath),
-                arrayOf("audio/mpeg", "audio/mp4"),
+                arrayOf(mp3File.absolutePath),
+                arrayOf("audio/mpeg"),
                 null
             )
-
-            withContext(Dispatchers.Main) {
-                notification.complete("Download complete")
-                Toast.makeText(context, "MP3 saved to Downloads/JuToob/", Toast.LENGTH_SHORT).show()
-            }
         } catch (e: Exception) {
             Log.e(TAG, "MP3 conversion error", e)
-            withContext(Dispatchers.Main) {
-                notification.error("Conversion failed")
-                Toast.makeText(context, "MP3 conversion failed: ${e.message}", Toast.LENGTH_LONG).show()
-            }
             tempMp3.delete()
+            throw e
         }
     }

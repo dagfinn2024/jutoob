@@ -84,6 +84,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.lifecycleScope
 import com.ju.toob.ui.theme.JuToobTheme
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -124,7 +125,8 @@ class MainActivity : ComponentActivity() {
     private var isFirstLoad = true
     private var skipSponsorsEnabled by mutableStateOf(true)
     private var blockShortsEnabled by mutableStateOf(true)
-    
+    private var blockCommunityPostsEnabled by mutableStateOf(true)
+
     private var showDownloadDialog by mutableStateOf(false)
     private var currentVideoId by mutableStateOf<String?>(null)
     private var currentVideoTitle by mutableStateOf<String>("jutoob_video")
@@ -196,6 +198,53 @@ class MainActivity : ComponentActivity() {
         })();
     """.trimIndent().replace("\n", " ")
 
+    private val fixSearchFiltersScript = """
+        (function() {
+          if (window._jutoob_filter_fix) return;
+          window._jutoob_filter_fix = true;
+          document.addEventListener('click', function(e) {
+            var path = e.composedPath();
+            for (var i = 0; i < path.length; i++) {
+              var el = path[i];
+              if (!el.tagName) continue;
+              var tag = el.tagName.toLowerCase();
+              if (tag === 'ytm-chip-cloud-chip-renderer' || tag === 'yt-chip-cloud-chip-renderer' || tag === 'ytd-search-filter-renderer') {
+                var link = el.querySelector('a[href]');
+                if (!link) {
+                  var shadow = el.shadowRoot;
+                  if (shadow) link = shadow.querySelector('a[href]');
+                }
+                if (link && link.href) {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  window.location.href = link.href;
+                  return;
+                }
+                var btn = el.querySelector('button');
+                if (!btn) {
+                  var shadow2 = el.shadowRoot;
+                  if (shadow2) btn = shadow2.querySelector('button');
+                }
+                if (btn) {
+                  var rect = btn.getBoundingClientRect();
+                  var cx = rect.left + rect.width / 2;
+                  var cy = rect.top + rect.height / 2;
+                  try {
+                    var ts = new TouchEvent('touchstart', {bubbles: true, cancelable: true, touches: [new Touch({identifier: 1, target: btn, clientX: cx, clientY: cy})]});
+                    var te = new TouchEvent('touchend', {bubbles: true, cancelable: true, changedTouches: [new Touch({identifier: 1, target: btn, clientX: cx, clientY: cy})]});
+                    btn.dispatchEvent(ts);
+                    setTimeout(function() { btn.dispatchEvent(te); }, 50);
+                  } catch(ex) {
+                    btn.click();
+                  }
+                }
+                return;
+              }
+            }
+          }, true);
+        })();
+    """.trimIndent().replace("\n", " ")
+
     private val blockShortsScript = """
         (function() {
           if (window._jutoob_bs_injected) return;
@@ -248,6 +297,42 @@ class MainActivity : ComponentActivity() {
             removeShortsBetweenVideos();
           }
           setInterval(blockShorts, 1000);
+        })();
+    """.trimIndent().replace("\n", " ")
+
+    private val blockCommunityPostsScript = """
+        (function() {
+          if (window._jutoob_bcp_injected) return;
+          window._jutoob_bcp_injected = true;
+          var style = document.createElement('style');
+          style.id = 'jutoob-bcp-style';
+          style.textContent = '.ypc-hide { display: none !important; }';
+          document.head.appendChild(style);
+          function hideNonVideoPosts(root) {
+            if (!window._jutoob_block_community_posts) return;
+            var items = (root || document).querySelectorAll('ytm-rich-section-renderer');
+            items.forEach(function(item) {
+              var hasVideo = item.querySelector('ytm-thumbnail,a[href*="watch"],a[href*="/shorts/"]');
+              if (!hasVideo) item.classList.add('ypc-hide');
+            });
+          }
+          function unhideAll() {
+            document.querySelectorAll('.ypc-hide').forEach(function(el) { el.classList.remove('ypc-hide'); });
+          }
+          setTimeout(function() { hideNonVideoPosts(); }, 3000);
+          var observer = new MutationObserver(function(mutations) {
+            if (!window._jutoob_block_community_posts) return;
+            mutations.forEach(function(mutation) {
+              mutation.addedNodes.forEach(function(node) {
+                if (node.nodeType === 1) hideNonVideoPosts(node);
+              });
+            });
+          });
+          observer.observe(document.body, { childList: true, subtree: true });
+          setInterval(function() {
+            if (window._jutoob_block_community_posts) hideNonVideoPosts();
+            else unhideAll();
+          }, 3000);
         })();
     """.trimIndent().replace("\n", " ")
 
@@ -343,6 +428,7 @@ class MainActivity : ComponentActivity() {
 
         skipSponsorsEnabled = prefs.getBoolean("skip_sponsors_enabled", true)
         blockShortsEnabled = prefs.getBoolean("block_shorts_enabled", true)
+        blockCommunityPostsEnabled = prefs.getBoolean("block_community_posts_enabled", true)
 
         showConsentDialog = !hasConsented
 
@@ -368,6 +454,7 @@ class MainActivity : ComponentActivity() {
 
         enableEdgeToEdge()
 
+        val chromeUserAgent = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36"
         val settings = GeckoRuntimeSettings.Builder()
             .consoleOutput(true)
             .arguments(arrayOf(
@@ -391,10 +478,11 @@ class MainActivity : ComponentActivity() {
         }
 
         val sessionSettings = GeckoSessionSettings.Builder()
-            .useTrackingProtection(true)
+            .useTrackingProtection(false)
             .build()
 
         mainSession = GeckoSession(sessionSettings)
+        mainSession!!.settings.userAgentOverride = chromeUserAgent
         setupMainSessionDelegates(mainSession!!)
 
         mainSession?.apply {
@@ -601,6 +689,15 @@ class MainActivity : ComponentActivity() {
                                                 }
                                             )
                                             DropdownMenuItem(
+                                                text = { Text(if (blockCommunityPostsEnabled) "Block Community Posts ✓" else "Block Community Posts") },
+                                                onClick = {
+                                                    blockCommunityPostsEnabled = !blockCommunityPostsEnabled
+                                                    prefs.edit().putBoolean("block_community_posts_enabled", blockCommunityPostsEnabled).apply()
+                                                    mainSession?.loadUri("javascript:window._jutoob_block_community_posts = $blockCommunityPostsEnabled;")
+                                                    showMenu = false
+                                                }
+                                            )
+                                            DropdownMenuItem(
                                                 text = { Text("Enjoying jutoob?") },
                                                 onClick = {
                                                     showMenu = false
@@ -725,6 +822,12 @@ class MainActivity : ComponentActivity() {
                         videoTitle = currentVideoTitle,
                         onDismiss = { showDownloadDialog = false }
                     )
+                }
+
+                LaunchedEffect(Unit) {
+                    downloadProgressState.collect { progress ->
+                        mainSession?.loadUri("javascript:if(window._jutoob_setProgress)window._jutoob_setProgress($progress)")
+                    }
                 }
 
                 if (showAboutDialog) {
@@ -865,6 +968,18 @@ class MainActivity : ComponentActivity() {
                     return
                 }
 
+                if (title == "JUTOOB_SHARE") {
+                    val videoId = currentVideoId ?: return
+                    val shareUrl = "https://youtu.be/$videoId"
+                    val intent = Intent().apply {
+                        action = Intent.ACTION_SEND
+                        type = "text/plain"
+                        putExtra(Intent.EXTRA_TEXT, shareUrl)
+                    }
+                    startActivity(Intent.createChooser(intent, null))
+                    return
+                }
+
                 if (title?.startsWith("JUTOOB_SAVE_") == true) {
                     val parts = title.removePrefix("JUTOOB_SAVE_").split("_")
                     val time = if (parts.size == 2) parts[0].toDoubleOrNull() ?: 0.0 else 0.0
@@ -956,6 +1071,11 @@ class MainActivity : ComponentActivity() {
         }
         session.navigationDelegate = object : GeckoSession.NavigationDelegate {
             override fun onCanGoBack(session: GeckoSession, canGoBackValue: Boolean) { canGoBack = canGoBackValue }
+            override fun onNewSession(session: GeckoSession, uri: String): GeckoResult<GeckoSession> {
+                // Load popup URLs in the current session instead of blocking them
+                mainSession?.loadUri(uri)
+                return GeckoResult.fromValue(null)
+            }
             override fun onLoadRequest(session: GeckoSession, request: GeckoSession.NavigationDelegate.LoadRequest): GeckoResult<AllowOrDeny> {
                 val uri = request.uri
                 if (uri.startsWith("intent:") || uri.startsWith("vnd.youtube:") || uri.startsWith("youtube:") || uri.startsWith("android-app://com.google.android.youtube")) {
@@ -988,14 +1108,16 @@ class MainActivity : ComponentActivity() {
                  s.loadUri("javascript:(function() { " +
                         "window._jutoob_sb_enabled = $skipSponsorsEnabled; " +
                         "window._jutoob_block_shorts = $blockShortsEnabled; " +
-                        "try { Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36', configurable: false }); } catch(e) {} " +
+                        "window._jutoob_block_community_posts = $blockCommunityPostsEnabled; " +
                         "var bannerStyle = document.getElementById('jutoob-banner-style'); if (!bannerStyle) { bannerStyle = document.createElement('style'); bannerStyle.id = 'jutoob-banner-style'; document.head.appendChild(bannerStyle); } " +
                         "bannerStyle.innerHTML = ` ytm-app-banner, .open-in-app-banner, ytm-mealbar-promo-renderer, ytd-app-promo-renderer, ytd-smart-app-banner-renderer, ytd-banner-promo-renderer { display: none !important; } .mobile-topbar-header, ytm-mobile-topbar-renderer { padding-right: $paddingValue !important; } `; " +
                         "function checkLive() { var isLive = !!(document.querySelector('.ytp-live') || document.querySelector('.badge-style-type-live-now') || !!document.querySelector('[itemprop=\"isLiveBroadcast\"]')); var oldT = document.title; document.title = isLive ? 'JUTOOB_LIVE_TRUE' : 'JUTOOB_LIVE_FALSE'; setTimeout(function(){ document.title = oldT; }, 100); } " +
                         "if (window._jutoob_live_interval) clearInterval(window._jutoob_live_interval); window._jutoob_live_interval = setInterval(checkLive, 5000); checkLive(); " +
                         "})()")
 
+                 s.loadUri("javascript:$fixSearchFiltersScript")
                  s.loadUri("javascript:$blockShortsScript")
+                 s.loadUri("javascript:$blockCommunityPostsScript")
 
                  if (url?.contains("/watch") == true || url?.contains("/shorts/") == true || url?.contains("/live/") == true) {
                      s.loadUri("javascript:$sponsorBlockScript")
@@ -1040,12 +1162,140 @@ class MainActivity : ComponentActivity() {
                         "if (window._jutoob_dl_interval) clearInterval(window._jutoob_dl_interval); " +
                         "window._jutoob_dl_interval = setInterval(injectDownloadBtn, 2000); " +
                         "})()")
+
+                     s.loadUri("javascript:(function() { " +
+                        "function hijackShareBtn() { " +
+                        "  var btns = document.querySelectorAll('button[aria-label*=\"Share\" i], button[aria-label*=\"share\" i]'); " +
+                        "  btns.forEach(function(btn) { " +
+                        "    if (btn._jutoob_share_hijacked) return; " +
+                        "    btn._jutoob_share_hijacked = true; " +
+                        "    btn.addEventListener('click', function(e) { " +
+                        "      e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); " +
+                        "      var oldTitle = document.title; " +
+                        "      document.title = 'JUTOOB_SHARE'; " +
+                        "      setTimeout(function() { document.title = oldTitle; }, 100); " +
+                        "    }, true); " +
+                        "  }); " +
+                        "} " +
+                        "hijackShareBtn(); " +
+                        "if (window._jutoob_share_observer) window._jutoob_share_observer.disconnect(); " +
+                        "window._jutoob_share_observer = new MutationObserver(hijackShareBtn); " +
+                        "window._jutoob_share_observer.observe(document.body, { childList: true, subtree: true }); " +
+                        "if (window._jutoob_share_interval) clearInterval(window._jutoob_share_interval); " +
+                        "window._jutoob_share_interval = setInterval(hijackShareBtn, 2000); " +
+                        "})()")
+
+                     s.loadUri("javascript:(function() { " +
+                        "if (!document.getElementById('jutoob-dl-anim-style')) { " +
+                        "  var s = document.createElement('style'); s.id = 'jutoob-dl-anim-style'; " +
+                        "  s.textContent = '" +
+                        "@keyframes jutoob-dl-bounce{0%,100%{transform:translateY(-2px)}50%{transform:translateY(2px)}} " +
+                        "#jutoob-dl-anim{animation:jutoob-dl-bounce 0.8s ease-in-out infinite} " +
+                        "@keyframes jutoob-dl-blink{0%,100%{opacity:1}50%{opacity:0}}'; " +
+                        "  document.head.appendChild(s); " +
+                        "} " +
+                        "window._jutoob_setProgress = function(p) { " +
+                        "  var el = document.getElementById('jutoob-dl-progress'); " +
+                        "  var pct = document.getElementById('jutoob-dl-pct'); " +
+                        "  var svg = document.getElementById('jutoob-dl-anim'); " +
+                        "  if (!el) return; " +
+                        "  if (p < 0) { el.style.display = 'none'; el.style.animation = ''; " +
+                        "    if (svg) svg.style.fill = '#FFD600'; el.style.color = '#FFD600'; return; } " +
+                        "  el.style.display = 'inline-flex'; " +
+                        "  if (p >= 100) { " +
+                        "    el.style.color = '#00E676'; if (svg) svg.style.fill = '#00E676'; " +
+                        "    if (pct) pct.textContent = '100%'; " +
+                        "    el.style.animation = 'jutoob-dl-blink 0.4s ease-in-out 3'; " +
+                        "  } else { " +
+                        "    el.style.color = '#FFD600'; if (svg) svg.style.fill = '#FFD600'; " +
+                        "    el.style.animation = ''; " +
+                        "    if (pct) pct.textContent = p < 10 ? p.toFixed(1) + '%' : Math.floor(p) + '%'; " +
+                        "  } " +
+                        "}; " +
+                        "function injectProgress() { " +
+                        "  var dlBtn = document.getElementById('jutoob-download-btn'); " +
+                        "  if (!dlBtn || document.getElementById('jutoob-dl-progress')) return; " +
+                        "  var prog = document.createElement('div'); " +
+                        "  prog.id = 'jutoob-dl-progress'; " +
+                        "  prog.style.cssText = 'display:none;align-items:center;margin-right:8px;color:#FFD600;font-size:11px;white-space:nowrap;font-family:sans-serif;'; " +
+                        "  prog.innerHTML = '<svg id=\"jutoob-dl-anim\" viewBox=\"0 0 24 24\" style=\"width:16px;height:16px;fill:#FFD600;margin-right:2px;\"><path d=\"M19 9h-4V3H9v6H5l7 7 7-7z\"/><rect x=\"5\" y=\"18\" width=\"14\" height=\"2\"/></svg><span id=\"jutoob-dl-pct\"></span>'; " +
+                        "  dlBtn.insertAdjacentElement('afterend', prog); " +
+                        "} " +
+                        "injectProgress(); " +
+                        "if (window._jutoob_progress_observer) window._jutoob_progress_observer.disconnect(); " +
+                        "window._jutoob_progress_observer = new MutationObserver(injectProgress); " +
+                        "window._jutoob_progress_observer.observe(document.body, {childList:true, subtree:true}); " +
+                        "if (window._jutoob_progress_interval) clearInterval(window._jutoob_progress_interval); " +
+                        "window._jutoob_progress_interval = setInterval(injectProgress, 2000); " +
+                        "})()")
                  }
             }
         }
         session.progressDelegate = object : GeckoSession.ProgressDelegate {
             override fun onPageStop(session: GeckoSession, success: Boolean) { if (success && !isYoutubeLoaded && !isInstalling) { Handler(Looper.getMainLooper()).postDelayed({ if (!isYoutubeLoaded) isYoutubeLoaded = true }, 200) } }
             override fun onProgressChange(session: GeckoSession, progress: Int) { if (progress >= 100 && !isYoutubeLoaded && !isInstalling) { Handler(Looper.getMainLooper()).postDelayed({ if (!isYoutubeLoaded) isYoutubeLoaded = true }, 200) } }
+        }
+
+        session.promptDelegate = object : GeckoSession.PromptDelegate {
+            override fun onChoicePrompt(session: GeckoSession, prompt: GeckoSession.PromptDelegate.ChoicePrompt): GeckoResult<GeckoSession.PromptDelegate.PromptResponse> {
+                val result = GeckoResult<GeckoSession.PromptDelegate.PromptResponse>()
+                val choices = prompt.choices ?: run {
+                    result.complete(prompt.dismiss())
+                    return result
+                }
+                Handler(Looper.getMainLooper()).post {
+                    val labels = choices.map { it.label ?: "" }.toTypedArray()
+                    val selectedIndex = choices.indexOfFirst { it.selected }
+                    android.app.AlertDialog.Builder(this@MainActivity, android.R.style.Theme_DeviceDefault_Dialog)
+                        .setTitle(prompt.title ?: prompt.message)
+                        .setSingleChoiceItems(labels, selectedIndex) { dialog, which ->
+                            result.complete(prompt.confirm(choices[which].id))
+                            dialog.dismiss()
+                        }
+                        .setNegativeButton("Cancel") { _, _ ->
+                            result.complete(prompt.dismiss())
+                        }
+                        .setOnCancelListener {
+                            result.complete(prompt.dismiss())
+                        }
+                        .show()
+                }
+                return result
+            }
+
+            override fun onAlertPrompt(session: GeckoSession, prompt: GeckoSession.PromptDelegate.AlertPrompt): GeckoResult<GeckoSession.PromptDelegate.PromptResponse> {
+                val result = GeckoResult<GeckoSession.PromptDelegate.PromptResponse>()
+                Handler(Looper.getMainLooper()).post {
+                    android.app.AlertDialog.Builder(this@MainActivity)
+                        .setTitle(prompt.title)
+                        .setMessage(prompt.message)
+                        .setPositiveButton("OK") { _, _ -> result.complete(prompt.dismiss()) }
+                        .setOnCancelListener { result.complete(prompt.dismiss()) }
+                        .show()
+                }
+                return result
+            }
+
+            override fun onButtonPrompt(session: GeckoSession, prompt: GeckoSession.PromptDelegate.ButtonPrompt): GeckoResult<GeckoSession.PromptDelegate.PromptResponse> {
+                val result = GeckoResult<GeckoSession.PromptDelegate.PromptResponse>()
+                Handler(Looper.getMainLooper()).post {
+                    android.app.AlertDialog.Builder(this@MainActivity)
+                        .setTitle(prompt.title)
+                        .setMessage(prompt.message)
+                        .setPositiveButton("OK") { _, _ -> result.complete(prompt.confirm(GeckoSession.PromptDelegate.ButtonPrompt.Type.POSITIVE)) }
+                        .setNegativeButton("Cancel") { _, _ -> result.complete(prompt.confirm(GeckoSession.PromptDelegate.ButtonPrompt.Type.NEGATIVE)) }
+                        .setOnCancelListener { result.complete(prompt.dismiss()) }
+                        .show()
+                }
+                return result
+            }
+
+            override fun onPopupPrompt(session: GeckoSession, prompt: GeckoSession.PromptDelegate.PopupPrompt): GeckoResult<GeckoSession.PromptDelegate.PromptResponse> {
+                val result = GeckoResult<GeckoSession.PromptDelegate.PromptResponse>()
+                mainSession?.loadUri(prompt.targetUri ?: "")
+                result.complete(prompt.dismiss())
+                return result
+            }
         }
     }
 
