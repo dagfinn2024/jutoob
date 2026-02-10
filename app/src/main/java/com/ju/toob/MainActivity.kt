@@ -105,6 +105,7 @@ import kotlin.coroutines.suspendCoroutine
 import kotlin.random.Random
 
 class MainActivity : ComponentActivity() {
+    private val chromeUserAgent = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36"
     private var geckoRuntime: GeckoRuntime? = null
     private var mainSession: GeckoSession? = null
     private var geckoView: GeckoView? = null
@@ -454,7 +455,6 @@ class MainActivity : ComponentActivity() {
 
         enableEdgeToEdge()
 
-        val chromeUserAgent = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36"
         val settings = GeckoRuntimeSettings.Builder()
             .consoleOutput(true)
             .arguments(arrayOf(
@@ -482,7 +482,6 @@ class MainActivity : ComponentActivity() {
             .build()
 
         mainSession = GeckoSession(sessionSettings)
-        mainSession!!.settings.userAgentOverride = chromeUserAgent
         setupMainSessionDelegates(mainSession!!)
 
         mainSession?.apply {
@@ -1109,6 +1108,7 @@ class MainActivity : ComponentActivity() {
                         "window._jutoob_sb_enabled = $skipSponsorsEnabled; " +
                         "window._jutoob_block_shorts = $blockShortsEnabled; " +
                         "window._jutoob_block_community_posts = $blockCommunityPostsEnabled; " +
+                        "try { Object.defineProperty(navigator, 'userAgent', { get: () => '$chromeUserAgent', configurable: true }); } catch(e) {} " +
                         "var bannerStyle = document.getElementById('jutoob-banner-style'); if (!bannerStyle) { bannerStyle = document.createElement('style'); bannerStyle.id = 'jutoob-banner-style'; document.head.appendChild(bannerStyle); } " +
                         "bannerStyle.innerHTML = ` ytm-app-banner, .open-in-app-banner, ytm-mealbar-promo-renderer, ytd-app-promo-renderer, ytd-smart-app-banner-renderer, ytd-banner-promo-renderer { display: none !important; } .mobile-topbar-header, ytm-mobile-topbar-renderer { padding-right: $paddingValue !important; } `; " +
                         "function checkLive() { var isLive = !!(document.querySelector('.ytp-live') || document.querySelector('.badge-style-type-live-now') || !!document.querySelector('[itemprop=\"isLiveBroadcast\"]')); var oldT = document.title; document.title = isLive ? 'JUTOOB_LIVE_TRUE' : 'JUTOOB_LIVE_FALSE'; setTimeout(function(){ document.title = oldT; }, 100); } " +
@@ -1382,9 +1382,11 @@ class MainActivity : ComponentActivity() {
 
             mainSession?.stop()
             delay(1500)
-            // Loading the homepage ensures a fresh start with all extensions active
+            // Re-activate the session after stop, then load with all extensions active
+            mainSession?.setActive(true)
+            geckoRuntime?.webExtensionController?.setTabActive(mainSession!!, true)
             mainSession?.loadUri("https://m.youtube.com/results?search_query=trending&jutoob_startup=1")
-            
+
             isInstalling = false
             delay(2000)
             showConsole = false
@@ -1422,11 +1424,13 @@ fun YouTubeGeckoPlayer(
     val pullEnabledState = remember { mutableStateOf(false) }
     val progressCallback = remember { mutableStateOf<(Float) -> Unit>({}) }
     val releaseCallback = remember { mutableStateOf<(Float) -> Unit>({}) }
+    val installingState = remember { mutableStateOf(false) }
 
     atTopState.value = isAtScrollTop
     pullEnabledState.value = isPullToRefreshEnabled
     progressCallback.value = onPullProgress
     releaseCallback.value = onPullRelease
+    installingState.value = isInstalling
 
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(session, lifecycleOwner) {
@@ -1489,13 +1493,13 @@ fun YouTubeGeckoPlayer(
                 }
 
                 viewTreeObserver.addOnWindowFocusChangeListener { hasFocus ->
-                    if (hasFocus && !isInstalling) session.setActive(true)
+                    if (hasFocus && !installingState.value) session.setActive(true)
                 }
             }.also { onViewReady(it) }
         },
         update = { view ->
             view.setBackgroundColor(Color.BLACK)
-            if (view.isShown && !isInstalling) session.setActive(true)
+            if (view.isShown && !installingState.value) session.setActive(true)
         }
     )
 }

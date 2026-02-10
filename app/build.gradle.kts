@@ -11,8 +11,8 @@ android {
         applicationId = "com.ju.toob"
         minSdk = 28
         targetSdk = 35
-        versionCode = 36
-        versionName = "3.6"
+        versionCode = 40
+        versionName = "4.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

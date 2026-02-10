@@ -570,10 +570,10 @@ private suspend fun singleStreamDownload(
                         if (now - lastUpdate >= PROGRESS_UPDATE_INTERVAL_MS) {
                             lastUpdate = now
                             if (totalSize > 0) {
-                                val pct = ((downloaded * 100) / totalSize).toInt()
-                                notification.progress(pct, String.format("%.1f / %.1f MB (%d%%)",
-                                    downloaded / (1024.0 * 1024.0), totalSize / (1024.0 * 1024.0), pct))
-                                onProgress?.invoke(pct.toFloat())
+                                val pct = (downloaded * 100f) / totalSize
+                                notification.progress(pct.toInt(), String.format("%.1f / %.1f MB (%d%%)",
+                                    downloaded / (1024.0 * 1024.0), totalSize / (1024.0 * 1024.0), pct.toInt()))
+                                onProgress?.invoke(pct)
                             } else {
                                 notification.indeterminate(String.format("%.1f MB downloaded", downloaded / (1024.0 * 1024.0)))
                             }
@@ -617,10 +617,10 @@ private suspend fun parallelDownload(
         while (isActive) {
             delay(PROGRESS_UPDATE_INTERVAL_MS)
             val dl = bytesDownloaded.get()
-            val pct = ((dl * 100) / totalSize).toInt()
-            notification.progress(pct, String.format("%.1f / %.1f MB (%d%%)",
-                dl / (1024.0 * 1024.0), totalSize / (1024.0 * 1024.0), pct))
-            onProgress?.invoke(pct.toFloat())
+            val pct = (dl * 100f) / totalSize
+            notification.progress(pct.toInt(), String.format("%.1f / %.1f MB (%d%%)",
+                dl / (1024.0 * 1024.0), totalSize / (1024.0 * 1024.0), pct.toInt()))
+            onProgress?.invoke(pct)
         }
     }
 
@@ -849,17 +849,17 @@ private fun performMp3Download(context: Context, title: String, option: StreamOp
                         current < 20f -> 0.20f
                         current < 40f -> 0.16f
                         current < 60f -> 0.12f
-                        current < 80f -> 0.08f
-                        current < 90f -> 0.04f
+                        current < 80f -> 0.10f
+                        current < 90f -> 0.05f
                         current < 95f -> 0.02f
                         else -> 0.01f
                     } else when {
                         current < 30f -> 0.20f
-                        current < 50f -> 0.16f
-                        current < 65f -> 0.12f
-                        current < 80f -> 0.08f
-                        current < 90f -> 0.04f
-                        current < 95f -> 0.02f
+                        current < 50f -> 0.18f
+                        current < 65f -> 0.16f
+                        current < 80f -> 0.14f
+                        current < 90f -> 0.10f
+                        current < 95f -> 0.03f
                         else -> 0.01f
                     }
                     current = minOf(current + baseIncrement * factor, 99f)
