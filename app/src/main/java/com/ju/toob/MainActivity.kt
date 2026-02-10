@@ -32,6 +32,7 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -830,11 +831,28 @@ class MainActivity : ComponentActivity() {
                 }
 
                 if (showAboutDialog) {
+                    val versionName = remember {
+                        try { context.packageManager.getPackageInfo(context.packageName, 0).versionName } catch (_: Exception) { "?" }
+                    }
                     AlertDialog(
                         onDismissRequest = { showAboutDialog = false },
-                        title = { Text("About") },
-                        text = { Text("jutoob is a minimal GeckoView-based viewer with browser extensions.\n" +
-                                "If you find it useful, you may optionally support further development.") },
+                        title = { Text("jutoob v$versionName") },
+                        text = {
+                            Column {
+                                Text("jutoob is a minimal, Android YouTube player built on GeckoView, for distraction-free viewing")
+                                Text(
+                                    text = "jutoob.com",
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.padding(top = 12.dp).clickable {
+                                        try {
+                                            CustomTabsIntent.Builder().build().launchUrl(context, Uri.parse("https://jutoob.com"))
+                                        } catch (_: Exception) {
+                                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://jutoob.com")))
+                                        }
+                                    }
+                                )
+                            }
+                        },
                         confirmButton = {
                             TextButton(onClick = { showAboutDialog = false }) {
                                 Text("OK")
@@ -880,12 +898,12 @@ class MainActivity : ComponentActivity() {
 
     override fun onStop() {
         super.onStop()
-        mainSession?.setActive(false)
     }
 
     override fun onStart() {
         super.onStart()
         mainSession?.setActive(true)
+        geckoRuntime?.webExtensionController?.setTabActive(mainSession!!, true)
         lastHeartbeatTime = System.currentTimeMillis()
     }
 

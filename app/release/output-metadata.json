@@ -16,8 +16,8 @@
         }
       ],
       "attributes": [],
-      "versionCode": 38,
-      "versionName": "3.8",
+      "versionCode": 42,
+      "versionName": "0.42",
       "outputFile": "app-arm64-v8a-release.apk"
     }
   ],
